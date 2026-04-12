@@ -1,0 +1,19 @@
+build/
+build-*/
+.cache/
+.DS_Store
+*.o
+*.obj
+compile_commands.json
+.vscode/
+.idea/
+CMakeUserPresets.json
+
+# ImGui persistent UI state — written to CWD when the viewer runs.
+imgui.ini
+
+# Generated docs (run `doxygen Doxyfile` to rebuild).
+docs/
+
+# GIF recordings from the viewer.
+recording_*.gif

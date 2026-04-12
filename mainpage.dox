@@ -1,0 +1,74 @@
+/**
+@mainpage Schrödinger's Smoke
+
+@section intro Overview
+
+A real-time implementation of the Incompressible Schrödinger Flow (ISF) algorithm
+from Chern, Knöppel, Pinkall, Schröder, Weißmann (SIGGRAPH 2016).  The fluid state
+is a two-component complex wave function ψ : M → C² on a periodic 3D lattice.
+Velocity is recovered from the edge 1-form η = ℏ · arg⟨ψ_v, ψ_w⟩.  Vorticity
+concentrates into quantized filaments of strength 2πℏ, producing leapfrogging
+rings, reconnection, and turbulent mixing without Lagrangian tracking.
+
+@section algo Algorithm (per time step)
+
+The solver implements Algorithm 1 of the paper:
+
+1. **Schrödinger integration** (@ref isf::schrodinger_step) — FFT spectral
+   propagator using the continuous Laplacian eigenvalues (Eq. 18).
+2. **Normalization** (@ref isf::normalize) — pointwise rescale to |ψ|² = 1.
+3. **Pressure projection** (@ref isf::pressure_project) — enforce divergence-free
+   velocity via a discrete Poisson solve (FFT, discrete Laplacian Eq. 17).
+4. **Velocity recovery** (@ref isf::recover_velocity) — edge arg averaging to
+   vertex-centered 3-vectors for particle advection.
+
+Step 4 has a fast variant @ref isf::recover_velocity_from_workspace that derives
+the post-correction velocity algebraically (η' = η − ∇q) from the cached pressure
+workspace, eliminating redundant inner-product computation (~25% speedup at 128³).
+
+@section init Initial conditions
+
+- **Vortex ring** (@ref isf::init_vortex_ring_z) — slab construction from Sec. 3.1
+  of the paper.  A 2π phase winding across a disk-shaped slab creates a single
+  quantized vortex filament along the disk boundary.
+- **Colliding spheres** (@ref isf::init_two_velocity_balls) — two ball-shaped
+  regions initialized with opposing velocities via iterated constraint projection
+  (Algorithm 4, Sec. 3.2).
+
+@section classes Key classes
+
+- @ref isf::Grid3D — periodic 3D lattice storing the two-component wave function
+  ψ = (ψ₁, ψ₂) as separate complex arrays in row-major (x-fastest) layout.
+- @ref isf::PressureWorkspace — reusable scratch buffers for pressure projection
+  (edge 1-forms, divergence, Poisson potential, FFT scratch).  Also supplies the
+  cached data for the fast velocity recovery path.
+- @ref isf::VelocityField — vertex-centered velocity (vx, vy, vz) in the same
+  layout as the grid.
+- @ref viz::ParticleSystem — structure-of-arrays particle cloud with optional
+  per-particle colour for the colliding-spheres demo.
+- @ref viz::ParticleRenderer — OpenGL 4.1 additive point-sprite renderer.
+- @ref viz::OrbitCamera — mouse-controlled orbit camera.
+- @ref viz::GifRecorder — captures rendered frames to animated GIF via msf_gif.
+
+@section perf Performance
+
+Benchmarked on Apple Silicon (single socket), 150k tracer particles:
+
+| Resolution | ms / frame | FPS |
+|------------|-----------|-----|
+| 64³        | 9 ms      | 109 |
+| 96³        | 22 ms     | 45  |
+| 128³       | 57 ms     | 18  |
+| 160³       | 93 ms     | 11  |
+
+@section deps Dependencies
+
+- C++20 compiler
+- CMake ≥ 3.20
+- GLFW 3, GLM (system packages)
+- OpenMP (optional, for parallel solver loops)
+- pocketfft (vendored, header-only)
+- Dear ImGui (fetched by CMake)
+- Catch2 v3 (fetched by CMake)
+- msf_gif (vendored, header-only)
+*/

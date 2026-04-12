@@ -1,0 +1,28 @@
+# Doxyfile for Schrödinger's Smoke
+PROJECT_NAME           = "Schrödinger's Smoke"
+PROJECT_NUMBER         = 0.1.0
+PROJECT_BRIEF          = "Incompressible fluid simulation via the Schrödinger equation"
+
+OUTPUT_DIRECTORY       = docs
+INPUT                  = src tests mainpage.dox
+FILE_PATTERNS          = *.hpp *.cpp *.dox
+RECURSIVE              = YES
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = YES
+EXTRACT_STATIC         = YES
+
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+HTML_COLORSTYLE        = LIGHT
+
+HAVE_DOT               = NO
+SOURCE_BROWSER         = YES
+INLINE_SOURCES         = NO
+REFERENCED_BY_RELATION = YES
+REFERENCES_RELATION    = YES
+
+OPTIMIZE_OUTPUT_FOR_C  = NO
+BUILTIN_STL_SUPPORT    = YES
+
+QUIET                  = YES
+WARNINGS               = YES
