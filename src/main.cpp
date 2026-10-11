@@ -478,6 +478,36 @@ try {
 
             ImGui::SliderFloat("density", &vol_params.density_scale, 1.0f, 60.0f, "%.1f");
             ImGui::SliderFloat("threshold", &vol_params.threshold, 0.001f, 0.5f, "%.3f");
+
+            static const char* prev_res_labels[] = {
+                "Native (Full Window)",
+                "720p (1280x720)",
+                "480p (854x480) [Fast RT]",
+                "360p (640x360) [Ultra Fast]",
+                "240p (426x240) [Max FPS]",
+                "Custom Scale"
+            };
+            int pr_idx = static_cast<int>(vol_params.preview_res);
+            if (ImGui::Combo("preview resolution", &pr_idx, prev_res_labels, IM_ARRAYSIZE(prev_res_labels))) {
+                vol_params.preview_res = static_cast<viz::PreviewResolution>(pr_idx);
+            }
+
+            if (vol_params.preview_res == viz::PreviewResolution::Custom) {
+                ImGui::SliderFloat("res scale", &vol_params.preview_scale, 0.20f, 1.0f, "%.2fx");
+            }
+
+            int cur_fbw = 0, cur_fbh = 0;
+            win.framebuffer_size(cur_fbw, cur_fbh);
+            auto [cur_w, cur_h] = viz::get_preview_dimensions(cur_fbw, cur_fbh, vol_params);
+            float ray_ratio = (cur_fbw > 0 && cur_fbh > 0) ? (float(cur_w * cur_h) / float(cur_fbw * cur_fbh)) : 1.0f;
+            if (ray_ratio < 0.99f) {
+                ImGui::TextColored(ImVec4(0.4f, 0.85f, 1.0f, 1.0f),
+                                   "RT Res: %dx%d (%.0f%% rays, ~%.1fx faster)",
+                                   cur_w, cur_h, ray_ratio * 100.0f, 1.0f / ray_ratio);
+            } else {
+                ImGui::TextDisabled("RT Res: %dx%d (Native 100%%)", cur_fbw, cur_fbh);
+            }
+
             ImGui::Checkbox("preview lighting", &vol_params.preview_lighting);
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Unchecked: Fast unlit preview for smooth interaction.\n"
@@ -677,7 +707,9 @@ try {
                                 static_cast<float>(kDomainSize),
                                 inv_view_proj,
                                 cam.position(),
-                                vol_params);
+                                vol_params,
+                                fbw,
+                                fbh);
         } else {
             renderer.draw(scene_pass, view_proj, point_size,
                           static_cast<float>(fbw), static_cast<float>(fbh));

@@ -35,18 +35,34 @@ enum class VolumePalette : int {
     SiggraphCollision = 5, ///< SIGGRAPH 2016 Head-on collision (Red & Blue dye mixing into Purple)
 };
 
+enum class PreviewResolution : int {
+    Native = 0, ///< Native full window resolution
+    p720   = 1, ///< 720p (1280x720)
+    p480   = 2, ///< 480p (854x480) — Fast RT preview
+    p360   = 3, ///< 360p (640x360) — Ultra-fast RT preview
+    p240   = 4, ///< 240p (426x240) — Maximum interactive framerate
+    Custom = 5, ///< Custom resolution scale
+};
+
 struct VolumeRenderParams {
-    VolumeFieldMode field_mode      = VolumeFieldMode::VorticityMagnitude;
-    VolumePalette   palette         = VolumePalette::SiggraphCollision; ///< Default to iconic SIGGRAPH 2016 look
-    float           density_scale   = 18.0f;
-    float           threshold       = 0.025f;
-    float           step_count      = 160.0f;
-    float           shadow_strength = 0.80f; ///< Volumetric self-shadowing (0 to 1.5)
-    float           light_x         = 0.40f; ///< Key light direction X
-    float           light_y         = 0.85f; ///< Key light direction Y
+    VolumeFieldMode   field_mode       = VolumeFieldMode::VorticityMagnitude;
+    VolumePalette     palette          = VolumePalette::SiggraphCollision; ///< Default to iconic SIGGRAPH 2016 look
+    float             density_scale    = 18.0f;
+    float             threshold        = 0.025f;
+    float             step_count       = 160.0f;
+    float             shadow_strength  = 0.80f; ///< Volumetric self-shadowing (0 to 1.5)
+    float             light_x          = 0.40f; ///< Key light direction X
+    float             light_y          = 0.85f; ///< Key light direction Y
     float           light_z         = 0.45f; ///< Key light direction Z
     bool            preview_lighting = false; ///< Viewport preview: false = unlit (fast), true = lit (studio)
+    PreviewResolution preview_res      = PreviewResolution::p480; ///< Default to 480p for fast RT preview
+    float             preview_scale    = 0.67f; ///< Scale factor when preview_res == Custom (0.2x to 1.0x)
 };
+
+/**
+ * @brief Calculate effective preview framebuffer dimensions given window size and resolution settings.
+ */
+std::pair<int, int> get_preview_dimensions(int fbw, int fbh, const VolumeRenderParams& params);
 
 class VolumeRenderer {
 public:
@@ -68,6 +84,8 @@ public:
      * @param inv_view_proj Inverse camera view · projection matrix.
      * @param cam_pos       World camera position.
      * @param params        Visual tuning parameters.
+     * @param fbw           Current window framebuffer width (pixels).
+     * @param fbh           Current window framebuffer height (pixels).
      */
     void render(wgfx::RenderPass* pass,
                 wgpu::Buffer vel_buffer,
@@ -77,7 +95,9 @@ public:
                 float domain_size,
                 const glm::mat4& inv_view_proj,
                 const glm::vec3& cam_pos,
-                const VolumeRenderParams& params);
+                const VolumeRenderParams& params,
+                int fbw = 0,
+                int fbh = 0);
 
     /**
      * @brief Render the volume directly using an active WebGPU RenderPassEncoder.
@@ -111,6 +131,8 @@ public:
                                const std::string& output_dir = "renders");
 
 private:
+    void ensure_preview_texture(int w, int h);
+
     struct UniformData {
         glm::mat4 inv_view_proj;
         glm::vec4 cam_pos;       // xyz: cam_pos, w: grid_n
@@ -128,6 +150,17 @@ private:
     wgpu::Buffer    bound_psi1_    = nullptr;
     wgpu::Buffer    bound_psi2_    = nullptr;
     int             bound_grid_n_  = 0;
+
+    // Sub-resolution real-time preview & upscaling blit pipeline
+    wgpu::Texture        preview_tex_     = nullptr;
+    wgpu::TextureView    preview_view_    = nullptr;
+    int                  preview_w_       = 0;
+    int                  preview_h_       = 0;
+
+    wgpu::RenderPipeline blit_pipeline_   = nullptr;
+    wgpu::BindGroupLayout blit_bgl_       = nullptr;
+    wgpu::BindGroup      blit_bg_         = nullptr;
+    wgpu::Sampler        linear_sampler_  = nullptr;
 };
 
 } // namespace viz

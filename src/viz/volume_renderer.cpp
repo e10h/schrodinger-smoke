@@ -455,6 +455,31 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 )wgsl";
 
+constexpr const char* kBlitShaderWGSL = R"wgsl(
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> VertexOutput {
+    var out: VertexOutput;
+    let x = f32(i32(in_vertex_index) / 2) * 4.0 - 1.0;
+    let y = f32(i32(in_vertex_index) % 2) * 4.0 - 1.0;
+    out.position = vec4<f32>(x, y, 0.0, 1.0);
+    out.uv = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+    return out;
+}
+
+@group(0) @binding(0) var s_sampler: sampler;
+@group(0) @binding(1) var s_texture: texture_2d<f32>;
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return textureSample(s_texture, s_sampler, in.uv);
+}
+)wgsl";
+
 } // namespace
 
 VolumeRenderer::VolumeRenderer()
@@ -491,10 +516,101 @@ VolumeRenderer::VolumeRenderer()
     pipeline_->fragmentBlend.alpha.operation = wgpu::BlendOperation::Add;
 
     pipeline_->init(nullptr);
+
+    // --- Sub-resolution preview upscaling pipeline ---
+    wgpu::ShaderModuleWGSLDescriptor sm_wgsl{};
+    sm_wgsl.chain.sType = wgpu::SType::ShaderModuleWGSLDescriptor;
+    sm_wgsl.code        = kBlitShaderWGSL;
+
+    wgpu::ShaderModuleDescriptor sm_desc{};
+    sm_desc.nextInChain = &sm_wgsl.chain;
+    wgpu::ShaderModule sm = wgfx::device.createShaderModule(sm_desc);
+
+    std::vector<wgpu::BindGroupLayoutEntry> bgl_entries(2);
+    bgl_entries[0].binding                 = 0;
+    bgl_entries[0].visibility              = wgpu::ShaderStage::Fragment;
+    bgl_entries[0].sampler.type            = wgpu::SamplerBindingType::Filtering;
+
+    bgl_entries[1].binding                 = 1;
+    bgl_entries[1].visibility              = wgpu::ShaderStage::Fragment;
+    bgl_entries[1].texture.sampleType      = wgpu::TextureSampleType::Float;
+    bgl_entries[1].texture.viewDimension   = wgpu::TextureViewDimension::_2D;
+    bgl_entries[1].texture.multisampled    = false;
+
+    wgpu::BindGroupLayoutDescriptor bgl_desc{};
+    bgl_desc.entryCount = static_cast<uint32_t>(bgl_entries.size());
+    bgl_desc.entries    = bgl_entries.data();
+    blit_bgl_ = wgfx::device.createBindGroupLayout(bgl_desc);
+
+    WGPUBindGroupLayout raw_bgl = blit_bgl_;
+    wgpu::PipelineLayoutDescriptor pl_desc{};
+    pl_desc.bindGroupLayoutCount = 1;
+    pl_desc.bindGroupLayouts     = &raw_bgl;
+    wgpu::PipelineLayout pl      = wgfx::device.createPipelineLayout(pl_desc);
+
+    wgpu::ColorTargetState color_target{};
+    color_target.format    = wgfx::surfaceFormat;
+    color_target.writeMask = wgpu::ColorWriteMask::All;
+    color_target.blend     = nullptr;
+
+    wgpu::FragmentState frag_state{};
+    frag_state.module      = sm;
+    frag_state.entryPoint  = "fs_main";
+    frag_state.targetCount = 1;
+    frag_state.targets     = &color_target;
+
+    wgpu::RenderPipelineDescriptor rpd{};
+    rpd.layout             = pl;
+    rpd.vertex.module      = sm;
+    rpd.vertex.entryPoint  = "vs_main";
+    rpd.fragment           = &frag_state;
+    rpd.primitive.topology = wgpu::PrimitiveTopology::TriangleList;
+    rpd.primitive.cullMode = wgpu::CullMode::None;
+    rpd.multisample.count  = 1;
+    rpd.multisample.mask   = ~0u;
+    rpd.multisample.alphaToCoverageEnabled = false;
+    blit_pipeline_         = wgfx::device.createRenderPipeline(rpd);
+
+    wgpu::SamplerDescriptor samp_desc{};
+    samp_desc.minFilter     = wgpu::FilterMode::Linear;
+    samp_desc.magFilter     = wgpu::FilterMode::Linear;
+    samp_desc.mipmapFilter  = wgpu::MipmapFilterMode::Linear;
+    samp_desc.addressModeU  = wgpu::AddressMode::ClampToEdge;
+    samp_desc.addressModeV  = wgpu::AddressMode::ClampToEdge;
+    samp_desc.addressModeW  = wgpu::AddressMode::ClampToEdge;
+    samp_desc.maxAnisotropy = 1;
+    samp_desc.lodMinClamp   = 0.0f;
+    samp_desc.lodMaxClamp   = 32.0f;
+    linear_sampler_         = wgfx::device.createSampler(samp_desc);
 }
 
 VolumeRenderer::~VolumeRenderer()
 {
+    if (preview_tex_) {
+        preview_tex_.destroy();
+        preview_tex_.release();
+        preview_tex_ = nullptr;
+    }
+    if (preview_view_) {
+        preview_view_.release();
+        preview_view_ = nullptr;
+    }
+    if (blit_bg_) {
+        blit_bg_.release();
+        blit_bg_ = nullptr;
+    }
+    if (blit_bgl_) {
+        blit_bgl_.release();
+        blit_bgl_ = nullptr;
+    }
+    if (blit_pipeline_) {
+        blit_pipeline_.release();
+        blit_pipeline_ = nullptr;
+    }
+    if (linear_sampler_) {
+        linear_sampler_.release();
+        linear_sampler_ = nullptr;
+    }
 }
 
 void VolumeRenderer::draw_to_encoder(wgpu::RenderPassEncoder rpe,
@@ -572,6 +688,81 @@ void VolumeRenderer::draw_to_encoder(wgpu::RenderPassEncoder rpe,
     rpe.draw(pipeline_->vertices, pipeline_->instances, 0, 0);
 }
 
+void VolumeRenderer::ensure_preview_texture(int w, int h)
+{
+    if (preview_tex_ && preview_w_ == w && preview_h_ == h) {
+        return;
+    }
+    if (preview_tex_) {
+        preview_tex_.destroy();
+        preview_tex_.release();
+        preview_tex_ = nullptr;
+    }
+    if (preview_view_) {
+        preview_view_.release();
+        preview_view_ = nullptr;
+    }
+    if (blit_bg_) {
+        blit_bg_.release();
+        blit_bg_ = nullptr;
+    }
+
+    preview_w_ = w;
+    preview_h_ = h;
+
+    wgpu::TextureDescriptor t_desc{};
+    t_desc.dimension       = wgpu::TextureDimension::_2D;
+    t_desc.format          = wgfx::surfaceFormat;
+    t_desc.size            = { static_cast<uint32_t>(preview_w_), static_cast<uint32_t>(preview_h_), 1 };
+    t_desc.sampleCount     = 1;
+    t_desc.mipLevelCount   = 1;
+    t_desc.usage           = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding;
+    preview_tex_           = wgfx::device.createTexture(t_desc);
+    preview_view_          = preview_tex_.createView();
+
+    std::vector<wgpu::BindGroupEntry> bg_entries(2);
+    bg_entries[0].binding     = 0;
+    bg_entries[0].sampler     = linear_sampler_;
+    bg_entries[1].binding     = 1;
+    bg_entries[1].textureView = preview_view_;
+
+    wgpu::BindGroupDescriptor bg_desc{};
+    bg_desc.layout     = blit_bgl_;
+    bg_desc.entryCount = bg_entries.size();
+    bg_desc.entries    = bg_entries.data();
+    blit_bg_           = wgfx::device.createBindGroup(bg_desc);
+}
+
+std::pair<int, int> get_preview_dimensions(int fbw, int fbh, const VolumeRenderParams& params)
+{
+    if (fbw <= 0 || fbh <= 0) return { fbw, fbh };
+    int target_h = 0;
+    switch (params.preview_res) {
+    case PreviewResolution::Native:
+        return { fbw, fbh };
+    case PreviewResolution::p720:
+        target_h = 720;
+        break;
+    case PreviewResolution::p480:
+        target_h = 480;
+        break;
+    case PreviewResolution::p360:
+        target_h = 360;
+        break;
+    case PreviewResolution::p240:
+        target_h = 240;
+        break;
+    case PreviewResolution::Custom:
+        target_h = std::clamp(static_cast<int>(fbh * params.preview_scale), 120, fbh);
+        break;
+    }
+    if (target_h >= fbh) {
+        return { fbw, fbh };
+    }
+    int target_w = std::max(1, (fbw * target_h) / fbh);
+    return { target_w, target_h };
+}
+
 void VolumeRenderer::render(wgfx::RenderPass* pass,
                             wgpu::Buffer vel_buffer,
                             wgpu::Buffer psi1_buffer,
@@ -580,11 +771,49 @@ void VolumeRenderer::render(wgfx::RenderPass* pass,
                             float domain_size,
                             const glm::mat4& inv_view_proj,
                             const glm::vec3& cam_pos,
-                            const VolumeRenderParams& params)
+                            const VolumeRenderParams& params,
+                            int fbw,
+                            int fbh)
 {
     if (!pass) return;
-    draw_to_encoder(pass->renderPass, vel_buffer, psi1_buffer, psi2_buffer,
+
+    auto [target_w, target_h] = get_preview_dimensions(fbw, fbh, params);
+
+    // If native resolution or invalid dimensions, render directly into the scene pass
+    if (fbw <= 0 || fbh <= 0 || (target_w == fbw && target_h == fbh)) {
+        draw_to_encoder(pass->renderPass, vel_buffer, psi1_buffer, psi2_buffer,
+                        grid_n, domain_size, inv_view_proj, cam_pos, params, false);
+        return;
+    }
+
+    // Render raymarching offscreen at the lower preview resolution
+    ensure_preview_texture(target_w, target_h);
+
+    wgpu::RenderPassColorAttachment ca{};
+    ca.view          = preview_view_;
+    ca.resolveTarget = nullptr;
+    ca.loadOp        = wgpu::LoadOp::Clear;
+    ca.storeOp       = wgpu::StoreOp::Store;
+    ca.clearValue    = { 0.02, 0.03, 0.06, 1.0 };
+#ifdef __EMSCRIPTEN__
+    ca.depthSlice    = WGPU_DEPTH_SLICE_UNDEFINED;
+#endif
+
+    wgpu::RenderPassDescriptor rp_desc{};
+    rp_desc.colorAttachmentCount   = 1;
+    rp_desc.colorAttachments       = &ca;
+    rp_desc.depthStencilAttachment = nullptr;
+
+    wgpu::RenderPassEncoder low_res_pass = wgfx::encoder.beginRenderPass(rp_desc);
+    draw_to_encoder(low_res_pass, vel_buffer, psi1_buffer, psi2_buffer,
                     grid_n, domain_size, inv_view_proj, cam_pos, params, false);
+    low_res_pass.end();
+    low_res_pass.release();
+
+    // Upscale blit with bilinear hardware filtering onto the full swapchain pass
+    pass->renderPass.setPipeline(blit_pipeline_);
+    pass->renderPass.setBindGroup(0, blit_bg_, 0, nullptr);
+    pass->renderPass.draw(3, 1, 0, 0);
 }
 
 std::string VolumeRenderer::render_to_file(wgpu::Buffer vel_buffer,
