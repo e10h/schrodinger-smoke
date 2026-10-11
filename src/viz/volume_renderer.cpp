@@ -582,6 +582,11 @@ VolumeRenderer::VolumeRenderer()
     samp_desc.lodMinClamp   = 0.0f;
     samp_desc.lodMaxClamp   = 32.0f;
     linear_sampler_         = wgfx::device.createSampler(samp_desc);
+
+    samp_desc.minFilter     = wgpu::FilterMode::Nearest;
+    samp_desc.magFilter     = wgpu::FilterMode::Nearest;
+    samp_desc.mipmapFilter  = wgpu::MipmapFilterMode::Nearest;
+    nearest_sampler_        = wgfx::device.createSampler(samp_desc);
 }
 
 VolumeRenderer::~VolumeRenderer()
@@ -610,6 +615,10 @@ VolumeRenderer::~VolumeRenderer()
     if (linear_sampler_) {
         linear_sampler_.release();
         linear_sampler_ = nullptr;
+    }
+    if (nearest_sampler_) {
+        nearest_sampler_.release();
+        nearest_sampler_ = nullptr;
     }
 }
 
@@ -688,49 +697,55 @@ void VolumeRenderer::draw_to_encoder(wgpu::RenderPassEncoder rpe,
     rpe.draw(pipeline_->vertices, pipeline_->instances, 0, 0);
 }
 
-void VolumeRenderer::ensure_preview_texture(int w, int h)
+void VolumeRenderer::ensure_preview_texture(int w, int h, bool linear)
 {
-    if (preview_tex_ && preview_w_ == w && preview_h_ == h) {
-        return;
-    }
-    if (preview_tex_) {
-        preview_tex_.destroy();
-        preview_tex_.release();
-        preview_tex_ = nullptr;
-    }
-    if (preview_view_) {
-        preview_view_.release();
-        preview_view_ = nullptr;
-    }
-    if (blit_bg_) {
-        blit_bg_.release();
-        blit_bg_ = nullptr;
+    bool need_new_tex = (!preview_tex_ || preview_w_ != w || preview_h_ != h);
+    bool need_new_bg  = (need_new_tex || !blit_bg_ || blit_linear_ != linear);
+
+    if (need_new_tex) {
+        if (preview_tex_) {
+            preview_tex_.destroy();
+            preview_tex_.release();
+            preview_tex_ = nullptr;
+        }
+        if (preview_view_) {
+            preview_view_.release();
+            preview_view_ = nullptr;
+        }
+
+        preview_w_ = w;
+        preview_h_ = h;
+
+        wgpu::TextureDescriptor t_desc{};
+        t_desc.dimension       = wgpu::TextureDimension::_2D;
+        t_desc.format          = wgfx::surfaceFormat;
+        t_desc.size            = { static_cast<uint32_t>(preview_w_), static_cast<uint32_t>(preview_h_), 1 };
+        t_desc.sampleCount     = 1;
+        t_desc.mipLevelCount   = 1;
+        t_desc.usage           = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding;
+        preview_tex_           = wgfx::device.createTexture(t_desc);
+        preview_view_          = preview_tex_.createView();
     }
 
-    preview_w_ = w;
-    preview_h_ = h;
+    if (need_new_bg) {
+        if (blit_bg_) {
+            blit_bg_.release();
+            blit_bg_ = nullptr;
+        }
+        blit_linear_ = linear;
 
-    wgpu::TextureDescriptor t_desc{};
-    t_desc.dimension       = wgpu::TextureDimension::_2D;
-    t_desc.format          = wgfx::surfaceFormat;
-    t_desc.size            = { static_cast<uint32_t>(preview_w_), static_cast<uint32_t>(preview_h_), 1 };
-    t_desc.sampleCount     = 1;
-    t_desc.mipLevelCount   = 1;
-    t_desc.usage           = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding;
-    preview_tex_           = wgfx::device.createTexture(t_desc);
-    preview_view_          = preview_tex_.createView();
+        std::vector<wgpu::BindGroupEntry> bg_entries(2);
+        bg_entries[0].binding     = 0;
+        bg_entries[0].sampler     = linear ? linear_sampler_ : nearest_sampler_;
+        bg_entries[1].binding     = 1;
+        bg_entries[1].textureView = preview_view_;
 
-    std::vector<wgpu::BindGroupEntry> bg_entries(2);
-    bg_entries[0].binding     = 0;
-    bg_entries[0].sampler     = linear_sampler_;
-    bg_entries[1].binding     = 1;
-    bg_entries[1].textureView = preview_view_;
-
-    wgpu::BindGroupDescriptor bg_desc{};
-    bg_desc.layout     = blit_bgl_;
-    bg_desc.entryCount = bg_entries.size();
-    bg_desc.entries    = bg_entries.data();
-    blit_bg_           = wgfx::device.createBindGroup(bg_desc);
+        wgpu::BindGroupDescriptor bg_desc{};
+        bg_desc.layout     = blit_bgl_;
+        bg_desc.entryCount = bg_entries.size();
+        bg_desc.entries    = bg_entries.data();
+        blit_bg_           = wgfx::device.createBindGroup(bg_desc);
+    }
 }
 
 std::pair<int, int> get_preview_dimensions(int fbw, int fbh, const VolumeRenderParams& params)
@@ -752,8 +767,17 @@ std::pair<int, int> get_preview_dimensions(int fbw, int fbh, const VolumeRenderP
     case PreviewResolution::p240:
         target_h = 240;
         break;
+    case PreviewResolution::p180:
+        target_h = 180;
+        break;
+    case PreviewResolution::p144:
+        target_h = 144;
+        break;
+    case PreviewResolution::p72:
+        target_h = 72;
+        break;
     case PreviewResolution::Custom:
-        target_h = std::clamp(static_cast<int>(fbh * params.preview_scale), 120, fbh);
+        target_h = std::clamp(static_cast<int>(fbh * params.preview_scale), 24, fbh);
         break;
     }
     if (target_h >= fbh) {
@@ -780,14 +804,18 @@ void VolumeRenderer::render(wgfx::RenderPass* pass,
     auto [target_w, target_h] = get_preview_dimensions(fbw, fbh, params);
 
     // If native resolution or invalid dimensions, render directly into the scene pass
-    if (fbw <= 0 || fbh <= 0 || (target_w == fbw && target_h == fbh)) {
+    if (fbw <= 0 || fbh <= 0 || (target_w >= fbw && target_h >= fbh)) {
+        pass->prepare();
         draw_to_encoder(pass->renderPass, vel_buffer, psi1_buffer, psi2_buffer,
                         grid_n, domain_size, inv_view_proj, cam_pos, params, false);
+        pass->end();
         return;
     }
 
-    // Render raymarching offscreen at the lower preview resolution
-    ensure_preview_texture(target_w, target_h);
+    // 1. Render raymarching offscreen at the lower preview resolution FIRST
+    // NOTE: In WebGPU, a CommandEncoder can only have one active render pass encoder at any time.
+    // The offscreen low_res_pass must begin, draw, and end BEFORE pass->prepare() opens the swapchain pass.
+    ensure_preview_texture(target_w, target_h, params.filter_linear);
 
     wgpu::RenderPassColorAttachment ca{};
     ca.view          = preview_view_;
@@ -810,10 +838,12 @@ void VolumeRenderer::render(wgfx::RenderPass* pass,
     low_res_pass.end();
     low_res_pass.release();
 
-    // Upscale blit with bilinear hardware filtering onto the full swapchain pass
+    // 2. Now open the swapchain pass and upscale blit onto the full screen
+    pass->prepare();
     pass->renderPass.setPipeline(blit_pipeline_);
     pass->renderPass.setBindGroup(0, blit_bg_, 0, nullptr);
     pass->renderPass.draw(3, 1, 0, 0);
+    pass->end();
 }
 
 std::string VolumeRenderer::render_to_file(wgpu::Buffer vel_buffer,

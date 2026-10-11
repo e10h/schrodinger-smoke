@@ -41,7 +41,10 @@ enum class PreviewResolution : int {
     p480   = 2, ///< 480p (854x480) — Fast RT preview
     p360   = 3, ///< 360p (640x360) — Ultra-fast RT preview
     p240   = 4, ///< 240p (426x240) — Maximum interactive framerate
-    Custom = 5, ///< Custom resolution scale
+    p180   = 5, ///< 180p (320x180) — Retro low-res
+    p144   = 6, ///< 144p (256x144) — Pixel preview
+    p72    = 7, ///< 72p  (128x72)  — Chunky ultra-low
+    Custom = 8, ///< Custom resolution scale
 };
 
 struct VolumeRenderParams {
@@ -53,10 +56,11 @@ struct VolumeRenderParams {
     float             shadow_strength  = 0.80f; ///< Volumetric self-shadowing (0 to 1.5)
     float             light_x          = 0.40f; ///< Key light direction X
     float             light_y          = 0.85f; ///< Key light direction Y
-    float           light_z         = 0.45f; ///< Key light direction Z
-    bool            preview_lighting = false; ///< Viewport preview: false = unlit (fast), true = lit (studio)
+    float             light_z          = 0.45f; ///< Key light direction Z
+    bool              preview_lighting = false; ///< Viewport preview: false = unlit (fast), true = lit (studio)
     PreviewResolution preview_res      = PreviewResolution::p480; ///< Default to 480p for fast RT preview
-    float             preview_scale    = 0.67f; ///< Scale factor when preview_res == Custom (0.2x to 1.0x)
+    float             preview_scale    = 0.50f; ///< Scale factor when preview_res == Custom (0.05x to 1.0x)
+    bool              filter_linear    = true;  ///< Upscaling filter: true = bilinear, false = nearest-neighbor
 };
 
 /**
@@ -131,7 +135,7 @@ public:
                                const std::string& output_dir = "renders");
 
 private:
-    void ensure_preview_texture(int w, int h);
+    void ensure_preview_texture(int w, int h, bool linear);
 
     struct UniformData {
         glm::mat4 inv_view_proj;
@@ -161,6 +165,8 @@ private:
     wgpu::BindGroupLayout blit_bgl_       = nullptr;
     wgpu::BindGroup      blit_bg_         = nullptr;
     wgpu::Sampler        linear_sampler_  = nullptr;
+    wgpu::Sampler        nearest_sampler_ = nullptr;
+    bool                 blit_linear_     = true;
 };
 
 } // namespace viz

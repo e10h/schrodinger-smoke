@@ -485,6 +485,9 @@ try {
                 "480p (854x480) [Fast RT]",
                 "360p (640x360) [Ultra Fast]",
                 "240p (426x240) [Max FPS]",
+                "180p (320x180) [Retro Low-Res]",
+                "144p (256x144) [Pixel Art]",
+                "72p  (128x72)  [Ultra Chunky]",
                 "Custom Scale"
             };
             int pr_idx = static_cast<int>(vol_params.preview_res);
@@ -493,7 +496,13 @@ try {
             }
 
             if (vol_params.preview_res == viz::PreviewResolution::Custom) {
-                ImGui::SliderFloat("res scale", &vol_params.preview_scale, 0.20f, 1.0f, "%.2fx");
+                ImGui::SliderFloat("res scale", &vol_params.preview_scale, 0.05f, 1.0f, "%.2fx");
+            }
+
+            ImGui::Checkbox("bilinear filter", &vol_params.filter_linear);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Checked: Smooth bilinear hardware upscaling.\n"
+                                  "Unchecked: Chunky nearest-neighbor pixels (makes low-res obvious!).");
             }
 
             int cur_fbw = 0, cur_fbh = 0;
@@ -696,7 +705,6 @@ try {
         }
 
         wgfx::RenderPass* scene_pass = win.render_pass();
-        scene_pass->prepare();
 
         if (render_mode == RenderMode::VolumeRaymarch) {
             vol_renderer.render(scene_pass,
@@ -711,11 +719,11 @@ try {
                                 fbw,
                                 fbh);
         } else {
+            scene_pass->prepare();
             renderer.draw(scene_pass, view_proj, point_size,
                           static_cast<float>(fbw), static_cast<float>(fbh));
+            scene_pass->end();
         }
-
-        scene_pass->end();
 
         win.end_frame();
     }
