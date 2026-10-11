@@ -26,6 +26,7 @@
 
 namespace isf {
 class Grid3D;
+struct VelocityField;
 } // namespace isf
 
 namespace viz {
@@ -60,6 +61,11 @@ public:
     void upload_grid(const isf::Grid3D& g);
 
     /**
+     * @brief Upload CPU velocity field into GPU velocity buffer.
+     */
+    void upload_velocity(const isf::VelocityField& vf);
+
+    /**
      * @brief Advance the fluid simulation by one time step on GPU.
      * @param dt   Time step.
      * @param hbar Planck constant ℏ.
@@ -73,6 +79,9 @@ public:
      * @param dt              Time step.
      */
     void advect_particles(wgpu::Buffer particle_buffer, std::size_t particle_count, double dt);
+
+    /// @brief Storage buffer holding the 3D Eulerian velocity field (vec4<f32> * N^3).
+    [[nodiscard]] wgpu::Buffer velocity_buffer() const noexcept { return b_vel_; }
 
 private:
     void init_buffers();

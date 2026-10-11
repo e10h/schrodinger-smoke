@@ -160,6 +160,7 @@ add_executable(schroedinger_viewer
     src/main.cpp
     src/viz/window.cpp
     src/viz/particle_renderer.cpp
+    src/viz/volume_renderer.cpp
     src/viz/gpu_solver.cpp
     src/viz/gif_recorder.cpp
 )

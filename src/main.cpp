@@ -19,12 +19,14 @@
 #include "viz/gpu_solver.hpp"
 #include "viz/particle_renderer.hpp"
 #include "viz/particles.hpp"
+#include "viz/volume_renderer.hpp"
 #include "viz/window.hpp"
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
 
 #include <glm/mat4x4.hpp>
+#include <glm/matrix.hpp>
 #include <glm/vec3.hpp>
 
 #include <cmath>
@@ -171,9 +173,15 @@ void seed_particles_two_balls(viz::ParticleSystem& ps,
 
 } // namespace
 
+enum class RenderMode : int {
+    VolumeRaymarch = 0, ///< Volumetric raymarching of Eulerian fields (default)
+    TracerParticles = 1, ///< Passive Lagrangian tracer particles
+};
+
 int main(int /*argc*/, char** /*argv*/)
 try {
-    viz::Window  win(1280, 720, "Schroedinger's Smoke (WebGPU)");
+    viz::Window           win(1280, 720, "Schroedinger's Smoke (WebGPU)");
+    viz::VolumeRenderer   vol_renderer;
     viz::ParticleRenderer renderer;
     viz::GifRecorder      recorder;
     viz::OrbitCamera      cam(
@@ -187,6 +195,10 @@ try {
 
     viz::GpuFluidSolver gpu_solver(grid_n, kDomainSize);
     bool use_gpu = true;
+
+    // Raytraced voxels (volumetric) is the default rendering mode
+    RenderMode render_mode = RenderMode::VolumeRaymarch;
+    viz::VolumeRenderParams vol_params;
 
     viz::ParticleSystem ps;
     std::mt19937 rng(0xC0FFEEu);
@@ -210,6 +222,10 @@ try {
         }
         renderer.upload(ps);
         gpu_solver.upload_grid(g);
+        if (use_gpu) {
+            // Initial micro-step so velocity buffer is immediately ready for raymarching
+            gpu_solver.step(0.0001, hbar);
+        }
     };
     reset_scene();
 
@@ -246,15 +262,20 @@ try {
         if (!pause_sim) {
             if (use_gpu) {
                 gpu_solver.step(dt, hbar);
-                gpu_solver.advect_particles(renderer.particle_buffer(),
-                                            renderer.particle_count(), dt);
+                if (render_mode == RenderMode::TracerParticles) {
+                    gpu_solver.advect_particles(renderer.particle_buffer(),
+                                                renderer.particle_count(), dt);
+                }
             } else {
                 isf::schrodinger_step(g, dt, hbar);
                 isf::normalize(g);
                 isf::pressure_project(g, press_ws);
                 isf::recover_velocity_from_workspace(g, hbar, press_ws, vf);
-                viz::advect_particles_rk2(ps, g, vf, dt);
-                renderer.upload(ps);
+                gpu_solver.upload_velocity(vf);
+                if (render_mode == RenderMode::TracerParticles) {
+                    viz::advect_particles_rk2(ps, g, vf, dt);
+                    renderer.upload(ps);
+                }
             }
         }
 
@@ -280,6 +301,42 @@ try {
         ImGui::Text("Grid: %d^3  particles: %zu", grid_n, static_cast<size_t>(n_particles));
 
         ImGui::Checkbox("GPU Compute Solver (WGSL)", &use_gpu);
+
+        static const char* render_mode_labels[] = {
+            "Raytraced Voxels (Volumetric)",
+            "Tracer Particles"
+        };
+        int rm_idx = static_cast<int>(render_mode);
+        if (ImGui::Combo("render mode", &rm_idx, render_mode_labels, IM_ARRAYSIZE(render_mode_labels))) {
+            render_mode = static_cast<RenderMode>(rm_idx);
+        }
+
+        if (render_mode == RenderMode::VolumeRaymarch) {
+            static const char* field_labels[] = {
+                "Vorticity |∇ × v|",
+                "Velocity Speed |v|",
+                "Enstrophy |∇ × v|²"
+            };
+            int f_idx = static_cast<int>(vol_params.field_mode);
+            if (ImGui::Combo("field", &f_idx, field_labels, IM_ARRAYSIZE(field_labels))) {
+                vol_params.field_mode = static_cast<viz::VolumeFieldMode>(f_idx);
+            }
+
+            static const char* pal_labels[] = {
+                "Neon Cyan (Quantum)",
+                "Fire Plasma",
+                "Deep Ocean",
+                "Wispy Smoke"
+            };
+            int pal_idx = static_cast<int>(vol_params.palette);
+            if (ImGui::Combo("palette", &pal_idx, pal_labels, IM_ARRAYSIZE(pal_labels))) {
+                vol_params.palette = static_cast<viz::VolumePalette>(pal_idx);
+            }
+
+            ImGui::SliderFloat("density", &vol_params.density_scale, 1.0f, 60.0f, "%.1f");
+            ImGui::SliderFloat("threshold", &vol_params.threshold, 0.001f, 0.5f, "%.3f");
+            ImGui::SliderFloat("ray steps", &vol_params.step_count, 32.0f, 320.0f, "%.0f");
+        }
 
         static const int  res_options[] = { 32, 64, 128, 256 };
         static const char* res_labels[]  = { "32^3", "64^3", "128^3", "256^3" };
@@ -307,9 +364,11 @@ try {
         if (ImGui::SliderFloat("dt", &dt_f, 1.0f/240.0f, 1.0f/15.0f, "%.4f")) {
             dt = dt_f;
         }
-        ImGui::SliderFloat("point size", &point_size, 1.0f, 12.0f, "%.1f");
-        if (ImGui::SliderInt("particles", &n_particles, 10000, 600000)) {
-            // will take effect on next reset particles
+        if (render_mode == RenderMode::TracerParticles) {
+            ImGui::SliderFloat("point size", &point_size, 1.0f, 12.0f, "%.1f");
+            if (ImGui::SliderInt("particles", &n_particles, 10000, 600000)) {
+                // will take effect on next reset particles
+            }
         }
         ImGui::Checkbox("pause", &pause_sim);
         if (ImGui::Button("reset ψ")) {
@@ -335,16 +394,29 @@ try {
         recorder.imgui_panel();
         ImGui::End();
 
-        // Particle draw call into WebGPU render pass
+        // Draw call into WebGPU render pass
         int fbw = 0, fbh = 0;
         win.framebuffer_size(fbw, fbh);
         const float aspect = fbh > 0 ? float(fbw) / float(fbh) : 1.0f;
         const glm::mat4 view_proj = cam.projection_matrix(aspect) * cam.view_matrix();
+        const glm::mat4 inv_view_proj = glm::inverse(view_proj);
 
         wgfx::RenderPass* scene_pass = win.render_pass();
         scene_pass->prepare();
-        renderer.draw(scene_pass, view_proj, point_size,
-                      static_cast<float>(fbw), static_cast<float>(fbh));
+
+        if (render_mode == RenderMode::VolumeRaymarch) {
+            vol_renderer.render(scene_pass,
+                                gpu_solver.velocity_buffer(),
+                                grid_n,
+                                static_cast<float>(kDomainSize),
+                                inv_view_proj,
+                                cam.position(),
+                                vol_params);
+        } else {
+            renderer.draw(scene_pass, view_proj, point_size,
+                          static_cast<float>(fbw), static_cast<float>(fbh));
+        }
+
         scene_pass->end();
 
         win.end_frame();

@@ -5,6 +5,7 @@
 
 #include "viz/gpu_solver.hpp"
 #include "isf/grid.hpp"
+#include "isf/velocity.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -850,6 +851,21 @@ void GpuFluidSolver::upload_grid(const isf::Grid3D& g)
 
     wgfx::queue.writeBuffer(b_psi1_, 0, p1_scratch.data(), p1_scratch.size() * sizeof(float));
     wgfx::queue.writeBuffer(b_psi2_, 0, p2_scratch.data(), p2_scratch.size() * sizeof(float));
+}
+
+void GpuFluidSolver::upload_velocity(const isf::VelocityField& vf)
+{
+    const size_t total_cells = static_cast<size_t>(grid_n_) * grid_n_ * grid_n_;
+    if (vf.size() != total_cells) return;
+    std::vector<float> vel_scratch(total_cells * 4);
+    #pragma omp parallel for schedule(static)
+    for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(total_cells); ++i) {
+        vel_scratch[4 * i + 0] = static_cast<float>(vf.vx[i]);
+        vel_scratch[4 * i + 1] = static_cast<float>(vf.vy[i]);
+        vel_scratch[4 * i + 2] = static_cast<float>(vf.vz[i]);
+        vel_scratch[4 * i + 3] = 0.0f;
+    }
+    wgfx::queue.writeBuffer(b_vel_, 0, vel_scratch.data(), vel_scratch.size() * sizeof(float));
 }
 
 void GpuFluidSolver::execute_fft_3d(wgpu::CommandEncoder& enc, wgpu::BindGroup bg, bool inverse)
