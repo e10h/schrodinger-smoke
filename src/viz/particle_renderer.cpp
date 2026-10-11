@@ -108,17 +108,16 @@ ParticleRenderer::ParticleRenderer()
     s_particles_ = pipeline_->addStorage(1, buffer_capacity_ * sizeof(GpuParticle),
                                          scratch_particles_.data(), /*readOnly=*/true);
 
-    pipeline_->init(nullptr);
-
     // Exact match to OpenGL: glBlendFunc(GL_SRC_ALPHA, GL_ONE)
-    // Recreate pipeline with custom blend factors to support unmodified stock wgfx
+    pipeline_->customBlend = true;
     pipeline_->fragmentBlend.color.srcFactor = wgpu::BlendFactor::SrcAlpha;
     pipeline_->fragmentBlend.color.dstFactor = wgpu::BlendFactor::One;
     pipeline_->fragmentBlend.color.operation = wgpu::BlendOperation::Add;
     pipeline_->fragmentBlend.alpha.srcFactor = wgpu::BlendFactor::Zero;
     pipeline_->fragmentBlend.alpha.dstFactor = wgpu::BlendFactor::One;
     pipeline_->fragmentBlend.alpha.operation = wgpu::BlendOperation::Add;
-    pipeline_->pipeline = wgfx::device.createRenderPipeline(pipeline_->pipelineDesc);
+
+    pipeline_->init(nullptr);
 }
 
 ParticleRenderer::~ParticleRenderer()
