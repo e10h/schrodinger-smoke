@@ -313,13 +313,13 @@ try {
 
         if (render_mode == RenderMode::VolumeRaymarch) {
             static const char* field_labels[] = {
-                "Vorticity |∇ × v|",
-                "Velocity Speed |v|",
-                "Enstrophy |∇ × v|²",
-                "ψ₁ Phase arg(ψ₁)",
-                "ψ₂ Phase arg(ψ₂)",
-                "ψ₁ Density |ψ₁|²",
-                "Spinor Phase arg(⟨ψ₁, ψ₂⟩)"
+                "Vorticity |curl v|",
+                "Speed |v|",
+                "Enstrophy |curl v|^2",
+                "Psi_1 Phase arg(psi1)",
+                "Psi_2 Phase arg(psi2)",
+                "Psi_1 Density |psi1|^2",
+                "Spinor Relative Phase"
             };
             int f_idx = static_cast<int>(vol_params.field_mode);
             if (ImGui::Combo("field", &f_idx, field_labels, IM_ARRAYSIZE(field_labels))) {
@@ -380,7 +380,7 @@ try {
             }
         }
         ImGui::Checkbox("pause", &pause_sim);
-        if (ImGui::Button("reset ψ")) {
+        if (ImGui::Button("reset psi")) {
             switch (scene) {
             case Scene::VortexRing:    reset_vortex_ring(g);     break;
             case Scene::CollidingBalls:reset_two_balls(g, hbar); break;
