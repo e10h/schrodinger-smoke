@@ -732,9 +732,9 @@ struct AdvectParams {
     psi_drift: f32,
     color_mode: u32,
     fade_non_core: f32,
-    _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
+    density_sample_mode: u32,
+    resample_rate: f32,
+    frame_seed: u32,
 };
 
 struct ParticleData {
@@ -748,6 +748,16 @@ struct ParticleData {
 @group(0) @binding(3) var<storage, read_write> s_particles: array<ParticleData>;
 @group(0) @binding(4) var<storage, read> s_psi1: array<vec2<f32>>;
 @group(0) @binding(5) var<storage, read> s_psi2: array<vec2<f32>>;
+
+fn pcg_hash(input: u32) -> u32 {
+    let state = input * 747796405u + 2891336453u;
+    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+fn rand_f32(seed: u32) -> f32 {
+    return f32(pcg_hash(seed)) / 4294967295.0;
+}
 
 fn sample_vel_trilinear(pos: vec3<f32>) -> vec3<f32> {
     let lx = u_sim.lx;
@@ -901,6 +911,23 @@ fn sample_psi1_density(pos: vec3<f32>) -> f32 {
     return dot(p, p);
 }
 
+fn get_target_density(pos: vec3<f32>, mode: u32) -> f32 {
+    let p1 = sample_psi1_trilinear(pos);
+    let rho1 = dot(p1, p1);
+    if (mode == 1u) {
+        // Vortex Smoke Density: 1 - |psi1|^2 (0 in ambient fluid, ~1 in vortex filament)
+        return clamp(1.0 - rho1, 0.0, 1.0);
+    } else if (mode == 2u) {
+        // Psi_1 Probability Density: |psi1|^2
+        return clamp(rho1, 0.0, 1.0);
+    } else if (mode == 3u) {
+        // Psi_2 Probability Density: |psi2|^2
+        let p2 = sample_psi2_trilinear(pos);
+        return clamp(dot(p2, p2), 0.0, 1.0);
+    }
+    return 1.0;
+}
+
 fn sample_density_grad(pos: vec3<f32>) -> vec3<f32> {
     let dx = u_sim.lx / f32(u_sim.nx);
     let dy = u_sim.ly / f32(u_sim.ny);
@@ -958,6 +985,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     pos1.x = wrap_pos(pos1.x, u_sim.lx);
     pos1.y = wrap_pos(pos1.y, u_sim.ly);
     pos1.z = wrap_pos(pos1.z, u_sim.lz);
+
+    // Born rule continuous relaxation / density following
+    if (u_adv.density_sample_mode > 0u) {
+        let rho_curr = get_target_density(pos1, u_adv.density_sample_mode);
+        let s0 = gid.x * 1664525u + u_adv.frame_seed;
+        let ru = rand_f32(s0 + 3041712669u);
+        // Teleport if trapped in low-density void (< 0.12) or chosen by relaxation renewal rate
+        if (rho_curr < 0.12 || ru < u_adv.resample_rate) {
+            let rx = rand_f32(s0);
+            let ry = rand_f32(s0 + 1013904223u);
+            let rz = rand_f32(s0 + 2027808446u);
+            let cand = vec3<f32>(rx * u_sim.lx, ry * u_sim.ly, rz * u_sim.lz);
+            let rho_cand = get_target_density(cand, u_adv.density_sample_mode);
+            let r_acc = rand_f32(s0 + 4055616892u);
+            if (r_acc < rho_cand) {
+                pos1 = cand;
+            }
+        }
+    }
 
     p.pos = vec4<f32>(pos1, p.pos.w);
 
@@ -1170,9 +1216,9 @@ void GpuFluidSolver::advect_particles(wgpu::Buffer particle_buffer, std::size_t 
         float    psi_drift;
         uint32_t color_mode;
         float    fade_non_core;
-        uint32_t pad0;
-        uint32_t pad1;
-        uint32_t pad2;
+        uint32_t density_sample_mode;
+        float    resample_rate;
+        uint32_t frame_seed;
     };
     AdvectParams adv_params{
         params.dt,
@@ -1180,7 +1226,9 @@ void GpuFluidSolver::advect_particles(wgpu::Buffer particle_buffer, std::size_t 
         params.psi_drift,
         static_cast<uint32_t>(params.color_mode),
         params.fade_non_core ? 1.0f : 0.0f,
-        0, 0, 0
+        static_cast<uint32_t>(params.density_sample_mode),
+        params.resample_rate,
+        params.frame_seed
     };
     wgfx::queue.writeBuffer(u_adv_param_, 0, &adv_params, sizeof(adv_params));
 

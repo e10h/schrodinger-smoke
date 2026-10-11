@@ -187,6 +187,66 @@ void seed_particles_uniform(viz::ParticleSystem& ps,
     }
 }
 
+void seed_particles_from_psi(viz::ParticleSystem& ps,
+                             const isf::Grid3D& g,
+                             std::mt19937& rng,
+                             int n_particles,
+                             viz::DensitySampleMode mode)
+{
+    resize_particles(ps, static_cast<std::size_t>(n_particles));
+    const std::size_t total_cells = g.size();
+    std::vector<double> weights(total_cells);
+
+    for (std::size_t i = 0; i < total_cells; ++i) {
+        const auto c1 = g.psi1(i);
+        const double rho1 = std::norm(c1);
+        if (mode == viz::DensitySampleMode::Psi1Density) {
+            weights[i] = std::clamp(rho1, 0.0, 1.0);
+        } else if (mode == viz::DensitySampleMode::Psi2Density) {
+            const auto c2 = g.psi2(i);
+            weights[i] = std::clamp(std::norm(c2), 0.0, 1.0);
+        } else {
+            // VortexSmoke: 1 - |psi1|^2 (vortex core / smoke ring)
+            weights[i] = std::max(0.0, 1.0 - rho1);
+        }
+    }
+
+    double sum = 0.0;
+    for (double w : weights) sum += w;
+    if (sum <= 1e-9) {
+        seed_particles_uniform(ps, rng, n_particles);
+        return;
+    }
+
+    std::discrete_distribution<std::size_t> dist(weights.begin(), weights.end());
+    std::uniform_real_distribution<double> jitter(-0.5, 0.5);
+
+    const int nx = g.nx();
+    const int ny = g.ny();
+    const double dx = g.dx();
+    const double dy = g.dy();
+    const double dz = g.dz();
+
+    for (int p = 0; p < n_particles; ++p) {
+        const std::size_t idx = dist(rng);
+        const int ix = static_cast<int>(idx % nx);
+        const int iy = static_cast<int>((idx / nx) % ny);
+        const int iz = static_cast<int>(idx / (nx * ny));
+
+        double px = (ix + 0.5 + jitter(rng)) * dx;
+        double py = (iy + 0.5 + jitter(rng)) * dy;
+        double pz = (iz + 0.5 + jitter(rng)) * dz;
+
+        ps.x[p] = std::clamp(px, 0.0, g.lx());
+        ps.y[p] = std::clamp(py, 0.0, g.ly());
+        ps.z[p] = std::clamp(pz, 0.0, g.lz());
+
+        ps.r[p] = 0.15f;
+        ps.g[p] = 0.85f;
+        ps.b[p] = 1.00f;
+    }
+}
+
 } // namespace
 
 enum class RenderMode : int {
@@ -195,8 +255,9 @@ enum class RenderMode : int {
 };
 
 enum class SeedPattern : int {
-    SceneGeometry = 0,
-    UniformBox    = 1
+    SceneGeometry  = 0,
+    UniformBox     = 1,
+    BornPsiDensity = 2
 };
 
 int main(int /*argc*/, char** /*argv*/)
@@ -236,6 +297,8 @@ try {
     auto seed_active_particles = [&]() {
         if (seed_pattern == SeedPattern::UniformBox) {
             seed_particles_uniform(ps, rng, n_particles);
+        } else if (seed_pattern == SeedPattern::BornPsiDensity) {
+            seed_particles_from_psi(ps, g, rng, n_particles, part_params.density_sample_mode);
         } else {
             switch (scene) {
             case Scene::VortexRing:     seed_particles_ring(ps, rng, n_particles);      break;
@@ -294,6 +357,7 @@ try {
                 gpu_solver.step(dt, hbar);
                 if (render_mode == RenderMode::TracerParticles) {
                     part_params.dt = static_cast<float>(dt);
+                    part_params.frame_seed += 1013904223u;
                     gpu_solver.advect_particles(renderer.particle_buffer(),
                                                 renderer.particle_count(),
                                                 part_params);
@@ -446,9 +510,35 @@ try {
 
             ImGui::Checkbox("fade non-core particles", &part_params.fade_non_core);
 
+            ImGui::SeparatorText("Born Rule Density Sampling");
+
+            static const char* sample_mode_labels[] = {
+                "Off (Standard Passive Advection)",
+                "Vortex Smoke (1 - |psi1|^2) [Born Relaxation]",
+                "Psi_1 Density (|psi1|^2)",
+                "Psi_2 Density (|psi2|^2)"
+            };
+            int sm_idx = static_cast<int>(part_params.density_sample_mode);
+            if (ImGui::Combo("density follow", &sm_idx, sample_mode_labels, IM_ARRAYSIZE(sample_mode_labels))) {
+                part_params.density_sample_mode = static_cast<viz::DensitySampleMode>(sm_idx);
+            }
+
+            ImGui::SliderFloat("relaxation rate", &part_params.resample_rate, 0.0f, 0.15f, "%.3f");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Continuous renewal rate: particles outside the density volume\n"
+                                  "continuously respawn into the 3D psi density so the particle cloud\n"
+                                  "permanently forms the 3D shape of psi.");
+            }
+
+            if (ImGui::Button("Reseed to |psi|^2 Density")) {
+                seed_particles_from_psi(ps, g, rng, n_particles, part_params.density_sample_mode);
+                renderer.upload(ps);
+            }
+
             static const char* seed_labels[] = {
                 "Scene Geometry (Toroid / Spheres)",
-                "Uniform Box Fill (Watch Ring Condense)"
+                "Uniform Box Fill (Watch Ring Condense)",
+                "Born |psi|^2 Density (Quantum Cloud)"
             };
             int s_idx = static_cast<int>(seed_pattern);
             if (ImGui::Combo("seed pattern", &s_idx, seed_labels, IM_ARRAYSIZE(seed_labels))) {

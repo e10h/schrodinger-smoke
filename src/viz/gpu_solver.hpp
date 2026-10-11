@@ -41,11 +41,21 @@ enum class ParticleColorMode : uint32_t {
     VelocitySpeed  = 4
 };
 
+enum class DensitySampleMode : uint32_t {
+    Off          = 0,
+    VortexSmoke  = 1,   ///< 1 - |psi1|^2 (vortex ring / smoke filaments)
+    Psi1Density  = 2,   ///< |psi1|^2
+    Psi2Density  = 3    ///< |psi2|^2
+};
+
 struct ParticleAdvectParams {
-    float             dt            = 0.016f;
-    float             psi_drift     = 0.0f;     ///< <0: attract to vortex core (|psi1|^2 -> 0), >0: attract to bulk
-    ParticleColorMode color_mode    = ParticleColorMode::Default;
-    bool              fade_non_core = false;    ///< Fade particles with low smoke density
+    float              dt                  = 0.016f;
+    float              psi_drift           = 0.0f;     ///< <0: attract to vortex core (|psi1|^2 -> 0), >0: attract to bulk
+    ParticleColorMode  color_mode          = ParticleColorMode::Default;
+    bool               fade_non_core       = false;    ///< Fade particles with low smoke density
+    DensitySampleMode  density_sample_mode = DensitySampleMode::VortexSmoke;
+    float              resample_rate       = 0.03f;    ///< Continuous Born relaxation rate (0 to 0.2)
+    uint32_t           frame_seed          = 0;        ///< PRNG seed updated each frame
 };
 
 /**
