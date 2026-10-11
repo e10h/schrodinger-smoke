@@ -32,12 +32,14 @@ Window::Window(int width, int height, const char* title)
     // Initialize WebGPU surface via wgfx
     wgfx::init(wgfx::getSurface(window_));
 
-    // Create swapchain color texture and render passes
+    // Create swapchain color texture, depth texture, and render passes
     color_tex_  = new wgfx::ColorTexture();
+    depth_tex_  = new wgfx::DepthTexture();
     scene_pass_ = new wgfx::RenderPass();
     ui_pass_    = new wgfx::RenderPass();
 
     scene_pass_->addTarget(color_tex_);
+    scene_pass_->addTarget(depth_tex_);
     ui_pass_->addTarget(color_tex_);
 
     scene_pass_->setClear({ 0.02, 0.03, 0.06, 1.0 });
@@ -69,6 +71,7 @@ Window::~Window()
 
     delete scene_pass_;
     delete ui_pass_;
+    delete depth_tex_;
     delete color_tex_;
 
     if (window_) {

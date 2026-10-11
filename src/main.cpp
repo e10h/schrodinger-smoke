@@ -915,8 +915,9 @@ try {
                                 fbh);
         } else {
             scene_pass->prepare();
-            renderer.draw(scene_pass, view_proj, point_size,
-                          static_cast<float>(fbw), static_cast<float>(fbh));
+            const glm::vec3 light_dir(vol_params.light_x, vol_params.light_y, vol_params.light_z);
+            renderer.draw(scene_pass, view_proj, cam.position(), point_size,
+                          static_cast<float>(fbw), static_cast<float>(fbh), light_dir);
             scene_pass->end();
         }
 

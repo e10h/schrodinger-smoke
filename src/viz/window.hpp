@@ -63,6 +63,7 @@ public:
     /** @brief Access to main scene render pass and surface color texture. */
     [[nodiscard]] wgfx::RenderPass* render_pass() const noexcept { return scene_pass_; }
     [[nodiscard]] wgfx::ColorTexture* color_target() const noexcept { return color_tex_; }
+    [[nodiscard]] wgfx::DepthTexture* depth_target() const noexcept { return depth_tex_; }
 
 private:
     SDL_Window*         window_       = nullptr;
@@ -73,6 +74,7 @@ private:
     Input               frame_input_{};
 
     wgfx::ColorTexture* color_tex_    = nullptr;
+    wgfx::DepthTexture* depth_tex_    = nullptr;
     wgfx::RenderPass*   scene_pass_   = nullptr;
     wgfx::RenderPass*   ui_pass_      = nullptr;
 };

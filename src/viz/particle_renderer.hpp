@@ -50,18 +50,22 @@ public:
      *
      * @param pass          Target wgfx render pass.
      * @param view_proj     Camera view · projection matrix.
+     * @param cam_pos       Camera world position.
      * @param point_size    Base point size in screen pixels.
      * @param screen_width  Framebuffer pixel width.
      * @param screen_height Framebuffer pixel height.
+     * @param light_dir     Key light direction (normalized).
      */
-    void draw(wgfx::RenderPass* pass, const glm::mat4& view_proj, float point_size,
-              float screen_width, float screen_height);
+    void draw(wgfx::RenderPass* pass, const glm::mat4& view_proj, const glm::vec3& cam_pos,
+              float point_size, float screen_width, float screen_height,
+              const glm::vec3& light_dir = glm::vec3(0.40f, 0.85f, 0.45f));
 
 private:
     struct CameraUniforms {
         glm::mat4 view_proj;
         glm::vec4 cam_pos{0.0f};
-        float     point_size    = 4.0f;
+        glm::vec4 light_dir{0.40f, 0.85f, 0.45f, 0.0f};
+        float     point_size    = 6.0f;
         float     screen_width  = 1280.0f;
         float     screen_height = 720.0f;
         float     pad0          = 0.0f;
