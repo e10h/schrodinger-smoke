@@ -55,7 +55,7 @@ inline void resize_particles(viz::ParticleSystem& ps, std::size_t n)
 }
 
 constexpr int    kInitialGridN     = 128;    ///< startup lattice size (power of 2)
-constexpr int    kInitialParticles = 150000; ///< startup tracer count
+constexpr int    kInitialParticles = 200000; ///< startup tracer count (100k per sphere like Houdini setup)
 constexpr double kDomainSize       = 1.0;    ///< physical domain (m)
 constexpr double kRingRadius       = 0.20;   ///< vortex ring radius (m)
 constexpr double kRingHalfThk      = 0.04;   ///< vortex ring slab half-thickness
@@ -293,8 +293,8 @@ try {
     viz::GpuFluidSolver gpu_solver(grid_n, kDomainSize);
     bool use_gpu = true;
 
-    // Raytraced voxels (volumetric) is the default rendering mode
-    RenderMode render_mode = RenderMode::VolumeRaymarch;
+    // Tracer particles is the default rendering mode (matching Chern et al. 2016 Houdini setup)
+    RenderMode render_mode = RenderMode::TracerParticles;
     viz::VolumeRenderParams vol_params;
     bool render_requested = false;
     std::string last_render_path;
@@ -308,7 +308,7 @@ try {
     Scene  scene = Scene::CollidingBalls;
     double hbar  = kHbarDefault;
     double dt    = 0.020;
-    float  point_size = 4.0f;
+    float  point_size = 6.0f; // matches paper's soft point splatting size
     bool   pause_sim  = false;
     int    sim_frame  = 0;
 
