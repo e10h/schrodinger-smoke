@@ -428,12 +428,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 @group(0) @binding(1) var<storage, read_write> s_psi1: array<vec2<f32>>;
 @group(0) @binding(2) var<storage, read_write> s_psi2: array<vec2<f32>>;
 
-@compute @workgroup_size(64, 1, 1)
+@compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let idx = gid.x;
-    let total = u_sim.nx * u_sim.ny * u_sim.nz;
-    if (idx >= total) { return; }
+    let i = gid.x;
+    let j = gid.y;
+    let k = gid.z;
+    if (i >= u_sim.nx || j >= u_sim.ny || k >= u_sim.nz) { return; }
 
+    let idx = cell_index(i, j, k, u_sim.nx, u_sim.ny);
     let p1 = s_psi1[idx];
     let p2 = s_psi2[idx];
     let m_sq = (p1.x * p1.x + p1.y * p1.y) + (p2.x * p2.x + p2.y * p2.y);
@@ -878,8 +880,6 @@ void GpuFluidSolver::step(double dt, double hbar)
 {
     const uint32_t N = static_cast<uint32_t>(grid_n_);
     const uint32_t num_wg3 = (N + 3) / 4;
-    const uint32_t total_cells = N * N * N;
-    const uint32_t num_wg1 = (total_cells + 63) / 64;
 
     struct SimParams {
         uint32_t nx, ny, nz, pad0;
@@ -911,16 +911,6 @@ void GpuFluidSolver::step(double dt, double hbar)
         cpass.release();
     };
 
-    auto dispatch_1d = [&](wgpu::ComputePipeline pipe, wgpu::BindGroup bg, uint32_t count) {
-        wgpu::ComputePassDescriptor cpDesc{};
-        wgpu::ComputePassEncoder cpass = enc.beginComputePass(cpDesc);
-        cpass.setPipeline(pipe);
-        cpass.setBindGroup(0, bg, 0, nullptr);
-        cpass.dispatchWorkgroups(count, 1, 1);
-        cpass.end();
-        cpass.release();
-    };
-
     // -------------------------------------------------------------
     // Step 1: Free-particle Schrödinger Step (Alg. 2)
     // -------------------------------------------------------------
@@ -937,7 +927,7 @@ void GpuFluidSolver::step(double dt, double hbar)
     // -------------------------------------------------------------
     // Step 2: Normalize ψ (|ψ| ← 1)
     // -------------------------------------------------------------
-    dispatch_1d(pipe_normalize_, bg_normalize_, num_wg1);
+    dispatch_3d(pipe_normalize_, bg_normalize_);
 
     // -------------------------------------------------------------
     // Step 3: Pressure Projection (Alg. 3)
