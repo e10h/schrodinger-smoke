@@ -315,18 +315,27 @@ try {
             static const char* field_labels[] = {
                 "Vorticity |∇ × v|",
                 "Velocity Speed |v|",
-                "Enstrophy |∇ × v|²"
+                "Enstrophy |∇ × v|²",
+                "ψ₁ Phase arg(ψ₁)",
+                "ψ₂ Phase arg(ψ₂)",
+                "ψ₁ Density |ψ₁|²",
+                "Spinor Phase arg(⟨ψ₁, ψ₂⟩)"
             };
             int f_idx = static_cast<int>(vol_params.field_mode);
             if (ImGui::Combo("field", &f_idx, field_labels, IM_ARRAYSIZE(field_labels))) {
                 vol_params.field_mode = static_cast<viz::VolumeFieldMode>(f_idx);
+                // Auto-suggest spectral rainbow palette when selecting phase modes
+                if ((f_idx == 3 || f_idx == 4 || f_idx == 6) && vol_params.palette == viz::VolumePalette::NeonCyan) {
+                    vol_params.palette = viz::VolumePalette::PhaseRainbow;
+                }
             }
 
             static const char* pal_labels[] = {
                 "Neon Cyan (Quantum)",
                 "Fire Plasma",
                 "Deep Ocean",
-                "Wispy Smoke"
+                "Wispy Smoke",
+                "Spectral Rainbow (Phase)"
             };
             int pal_idx = static_cast<int>(vol_params.palette);
             if (ImGui::Combo("palette", &pal_idx, pal_labels, IM_ARRAYSIZE(pal_labels))) {
@@ -407,6 +416,8 @@ try {
         if (render_mode == RenderMode::VolumeRaymarch) {
             vol_renderer.render(scene_pass,
                                 gpu_solver.velocity_buffer(),
+                                gpu_solver.psi1_buffer(),
+                                gpu_solver.psi2_buffer(),
                                 grid_n,
                                 static_cast<float>(kDomainSize),
                                 inv_view_proj,

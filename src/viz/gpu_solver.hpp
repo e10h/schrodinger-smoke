@@ -83,6 +83,12 @@ public:
     /// @brief Storage buffer holding the 3D Eulerian velocity field (vec4<f32> * N^3).
     [[nodiscard]] wgpu::Buffer velocity_buffer() const noexcept { return b_vel_; }
 
+    /// @brief Storage buffer holding ψ₁ spinor component (vec2<f32> * N^3).
+    [[nodiscard]] wgpu::Buffer psi1_buffer() const noexcept { return b_psi1_; }
+
+    /// @brief Storage buffer holding ψ₂ spinor component (vec2<f32> * N^3).
+    [[nodiscard]] wgpu::Buffer psi2_buffer() const noexcept { return b_psi2_; }
+
 private:
     void init_buffers();
     void init_pipelines();

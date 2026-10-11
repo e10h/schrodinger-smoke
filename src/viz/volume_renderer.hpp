@@ -17,16 +17,21 @@
 namespace viz {
 
 enum class VolumeFieldMode : int {
-    VorticityMagnitude = 0, ///< |∇ × v| (illuminates vortex rings and filaments)
-    Speed              = 1, ///< |v| (flow velocity magnitude)
-    Enstrophy          = 2, ///< |∇ × v|² (high-contrast vortex cores)
+    VorticityMagnitude  = 0, ///< |∇ × v| (illuminates vortex rings and filaments)
+    Speed               = 1, ///< |v| (flow velocity magnitude)
+    Enstrophy           = 2, ///< |∇ × v|² (high-contrast vortex cores)
+    Psi1Phase           = 3, ///< arg(ψ₁) (quantum phase angle of first spinor component)
+    Psi2Phase           = 4, ///< arg(ψ₂) (quantum phase angle of second spinor component)
+    Psi1Density         = 5, ///< |ψ₁|² (probability density; drops to 0 at vortex core)
+    SpinorRelativePhase = 6, ///< arg(⟨ψ₁, ψ₂⟩) (spinor cross-phase winding vortex filaments)
 };
 
 enum class VolumePalette : int {
-    NeonCyan   = 0, ///< Electric cyan/blue quantum filaments
-    FirePlasma = 1, ///< Hot thermal flame / plasma
-    DeepOcean  = 2, ///< Deep marine azure to seafoam
-    WispySmoke = 3, ///< Classic realistic additive smoke
+    NeonCyan     = 0, ///< Electric cyan/blue quantum filaments
+    FirePlasma   = 1, ///< Hot thermal flame / plasma
+    DeepOcean    = 2, ///< Deep marine azure to seafoam
+    WispySmoke   = 3, ///< Classic realistic additive smoke
+    PhaseRainbow = 4, ///< Cyclic HSV spectral rainbow for quantum phase
 };
 
 struct VolumeRenderParams {
@@ -46,10 +51,12 @@ public:
     VolumeRenderer& operator=(const VolumeRenderer&) = delete;
 
     /**
-     * @brief Render the Eulerian fluid field as raytraced voxels.
+     * @brief Render the Eulerian fluid field and/or ψ wavefunction as raytraced voxels.
      *
      * @param pass          Active wgfx render pass.
      * @param vel_buffer    WebGPU storage buffer holding vec4<f32> * N^3 velocity field.
+     * @param psi1_buffer   WebGPU storage buffer holding vec2<f32> * N^3 ψ₁ spinor component.
+     * @param psi2_buffer   WebGPU storage buffer holding vec2<f32> * N^3 ψ₂ spinor component.
      * @param grid_n        Grid resolution N.
      * @param domain_size   Domain size (meters).
      * @param inv_view_proj Inverse camera view · projection matrix.
@@ -58,6 +65,8 @@ public:
      */
     void render(wgfx::RenderPass* pass,
                 wgpu::Buffer vel_buffer,
+                wgpu::Buffer psi1_buffer,
+                wgpu::Buffer psi2_buffer,
                 int grid_n,
                 float domain_size,
                 const glm::mat4& inv_view_proj,
@@ -75,7 +84,11 @@ private:
     wgfx::Pipeline* pipeline_      = nullptr;
     wgfx::Uniform*  u_params_      = nullptr;
     wgfx::Uniform*  s_velocity_    = nullptr;
+    wgfx::Uniform*  s_psi1_        = nullptr;
+    wgfx::Uniform*  s_psi2_        = nullptr;
     wgpu::Buffer    bound_buffer_  = nullptr;
+    wgpu::Buffer    bound_psi1_    = nullptr;
+    wgpu::Buffer    bound_psi2_    = nullptr;
     int             bound_grid_n_  = 0;
 };
 

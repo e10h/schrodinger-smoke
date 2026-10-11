@@ -21,6 +21,8 @@ struct VolumeUniforms {
 
 @group(0) @binding(0) var<uniform> u_vol: VolumeUniforms;
 @group(0) @binding(1) var<storage, read> s_vel: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> s_psi1: array<vec2<f32>>;
+@group(0) @binding(3) var<storage, read> s_psi2: array<vec2<f32>>;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -86,6 +88,80 @@ fn sample_vel(p_in: vec3<f32>, n: u32, l: vec3<f32>) -> vec3<f32> {
     return mix(c0, c1, fz);
 }
 
+fn sample_psi1(p_in: vec3<f32>, n: u32, l: vec3<f32>) -> vec2<f32> {
+    let p = wrap_pos(p_in, l);
+    let u = p.x / l.x * f32(n);
+    let v = p.y / l.y * f32(n);
+    let w = p.z / l.z * f32(n);
+
+    let i0 = u32(clamp(floor(u), 0.0, f32(n - 1u)));
+    let j0 = u32(clamp(floor(v), 0.0, f32(n - 1u)));
+    let k0 = u32(clamp(floor(w), 0.0, f32(n - 1u)));
+    let i1 = (i0 + 1u) % n;
+    let j1 = (j0 + 1u) % n;
+    let k1 = (k0 + 1u) % n;
+
+    let fx = clamp(u - floor(u), 0.0, 1.0);
+    let fy = clamp(v - floor(v), 0.0, 1.0);
+    let fz = clamp(w - floor(w), 0.0, 1.0);
+
+    let c000 = s_psi1[cell_index(i0, j0, k0, n)];
+    let c100 = s_psi1[cell_index(i1, j0, k0, n)];
+    let c010 = s_psi1[cell_index(i0, j1, k0, n)];
+    let c110 = s_psi1[cell_index(i1, j1, k0, n)];
+    let c001 = s_psi1[cell_index(i0, j0, k1, n)];
+    let c101 = s_psi1[cell_index(i1, j0, k1, n)];
+    let c011 = s_psi1[cell_index(i0, j1, k1, n)];
+    let c111 = s_psi1[cell_index(i1, j1, k1, n)];
+
+    let c00 = mix(c000, c100, fx);
+    let c10 = mix(c010, c110, fx);
+    let c01 = mix(c001, c101, fx);
+    let c11 = mix(c011, c111, fx);
+
+    let c0 = mix(c00, c10, fy);
+    let c1 = mix(c01, c11, fy);
+
+    return mix(c0, c1, fz);
+}
+
+fn sample_psi2(p_in: vec3<f32>, n: u32, l: vec3<f32>) -> vec2<f32> {
+    let p = wrap_pos(p_in, l);
+    let u = p.x / l.x * f32(n);
+    let v = p.y / l.y * f32(n);
+    let w = p.z / l.z * f32(n);
+
+    let i0 = u32(clamp(floor(u), 0.0, f32(n - 1u)));
+    let j0 = u32(clamp(floor(v), 0.0, f32(n - 1u)));
+    let k0 = u32(clamp(floor(w), 0.0, f32(n - 1u)));
+    let i1 = (i0 + 1u) % n;
+    let j1 = (j0 + 1u) % n;
+    let k1 = (k0 + 1u) % n;
+
+    let fx = clamp(u - floor(u), 0.0, 1.0);
+    let fy = clamp(v - floor(v), 0.0, 1.0);
+    let fz = clamp(w - floor(w), 0.0, 1.0);
+
+    let c000 = s_psi2[cell_index(i0, j0, k0, n)];
+    let c100 = s_psi2[cell_index(i1, j0, k0, n)];
+    let c010 = s_psi2[cell_index(i0, j1, k0, n)];
+    let c110 = s_psi2[cell_index(i1, j1, k0, n)];
+    let c001 = s_psi2[cell_index(i0, j0, k1, n)];
+    let c101 = s_psi2[cell_index(i1, j0, k1, n)];
+    let c011 = s_psi2[cell_index(i0, j1, k1, n)];
+    let c111 = s_psi2[cell_index(i1, j1, k1, n)];
+
+    let c00 = mix(c000, c100, fx);
+    let c10 = mix(c010, c110, fx);
+    let c01 = mix(c001, c101, fx);
+    let c11 = mix(c011, c111, fx);
+
+    let c0 = mix(c00, c10, fy);
+    let c1 = mix(c01, c11, fy);
+
+    return mix(c0, c1, fz);
+}
+
 fn sample_vorticity(p: vec3<f32>, n: u32, l: vec3<f32>) -> f32 {
     let h = (l.x / f32(n)) * 1.0;
 
@@ -99,26 +175,98 @@ fn sample_vorticity(p: vec3<f32>, n: u32, l: vec3<f32>) -> f32 {
     let inv_2h = 0.5 / h;
     let curl_x = (yp.z - ym.z) * inv_2h - (zp.y - zm.y) * inv_2h;
     let curl_y = (zp.x - zm.x) * inv_2h - (xp.z - xm.z) * inv_2h;
-    let curl_z = (xp.y - xm.y) * inv_2h - (yp.x - ym.x) * inv_2h;
+    let curl_z = (xp.y - ym.y) * inv_2h - (yp.x - ym.x) * inv_2h;
 
     return length(vec3<f32>(curl_x, curl_y, curl_z));
 }
 
-fn sample_field(p: vec3<f32>, mode: i32, n: u32, l: vec3<f32>) -> f32 {
+struct FieldResult {
+    density_val: f32,
+    color_val: f32,
+    is_cyclic: bool,
+};
+
+fn evaluate_field(p: vec3<f32>, mode: i32, n: u32, l: vec3<f32>) -> FieldResult {
+    var res: FieldResult;
+    res.is_cyclic = false;
+
     if (mode == 0) {
         // Vorticity magnitude (normalized to ~[0, 10] range)
-        return sample_vorticity(p, n, l) * 0.1;
+        let v = sample_vorticity(p, n, l) * 0.1;
+        res.density_val = v;
+        res.color_val   = v;
     } else if (mode == 1) {
         // Velocity speed (magnitude in m/s, ~[0, 3] range)
-        return length(sample_vel(p, n, l));
-    } else {
+        let v = length(sample_vel(p, n, l));
+        res.density_val = v;
+        res.color_val   = v;
+    } else if (mode == 2) {
         // Enstrophy (|curl|^2)
         let vort = sample_vorticity(p, n, l) * 0.1;
-        return vort * vort * 0.5;
+        let v = vort * vort * 0.5;
+        res.density_val = v;
+        res.color_val   = v;
+    } else if (mode == 3) {
+        // ψ₁ Phase arg(ψ₁)
+        let c = sample_psi1(p, n, l);
+        var ph = (atan2(c.y, c.x) + 3.14159265) / 6.2831853;
+        if (ph < 0.0) { ph += 1.0; }
+        let mag = length(c);
+        // Phase is visible where wavefunction exists; density emphasizes phase boundaries
+        res.density_val = mag;
+        res.color_val   = ph;
+        res.is_cyclic   = true;
+    } else if (mode == 4) {
+        // ψ₂ Phase arg(ψ₂)
+        let c = sample_psi2(p, n, l);
+        var ph = (atan2(c.y, c.x) + 3.14159265) / 6.2831853;
+        if (ph < 0.0) { ph += 1.0; }
+        let mag = length(c);
+        res.density_val = mag;
+        res.color_val   = ph;
+        res.is_cyclic   = true;
+    } else if (mode == 5) {
+        // ψ₁ Probability Density |ψ₁|² (drops to zero at vortex filaments)
+        let c = sample_psi1(p, n, l);
+        let rho = dot(c, c);
+        res.density_val = rho;
+        res.color_val   = rho;
+    } else {
+        // Spinor Cross Phase arg(⟨ψ₁, ψ₂⟩) — helical phase around vortex lines
+        let p1 = sample_psi1(p, n, l);
+        let p2 = sample_psi2(p, n, l);
+        let re = p1.x * p2.x + p1.y * p2.y;
+        let im = p1.x * p2.y - p1.y * p2.x;
+        var ph = (atan2(im, re) + 3.14159265) / 6.2831853;
+        if (ph < 0.0) { ph += 1.0; }
+        let mag = length(p1) * length(p2) * 2.0;
+        res.density_val = mag;
+        res.color_val   = ph;
+        res.is_cyclic   = true;
     }
+    return res;
 }
 
-fn get_color(t_norm: f32, palette: i32) -> vec3<f32> {
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> vec3<f32> {
+    let hue = fract(h) * 6.0;
+    let c = v * s;
+    let x = c * (1.0 - abs(fract(hue * 0.5) * 2.0 - 1.0));
+    let m = v - c;
+    if (hue < 1.0) { return vec3<f32>(c + m, x + m, m); }
+    if (hue < 2.0) { return vec3<f32>(x + m, c + m, m); }
+    if (hue < 3.0) { return vec3<f32>(m, c + m, x + m); }
+    if (hue < 4.0) { return vec3<f32>(m, x + m, c + m); }
+    if (hue < 5.0) { return vec3<f32>(x + m, m, c + m); }
+    return vec3<f32>(c + m, m, x + m);
+}
+
+fn get_color(t_norm: f32, palette: i32, phase_norm: f32, is_cyclic: bool) -> vec3<f32> {
+    if (palette == 4 || (is_cyclic && palette == 0)) {
+        // Phase Rainbow / Quantum Phase: cyclic spectral hues
+        let ph = select(t_norm, phase_norm, is_cyclic);
+        return hsv_to_rgb(ph, 0.90, 0.25 + 0.75 * clamp(t_norm, 0.0, 1.0));
+    }
+
     let t = clamp(t_norm, 0.0, 1.0);
     if (palette == 0) {
         // Neon Cyan: dark sapphire -> bright electric cyan -> white
@@ -190,13 +338,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         if (f32(s) >= num_steps || t >= t_exit) { break; }
 
         let p = ro + t * rd;
-        let val = sample_field(p, field_mode, grid_n, box_max);
+        let f = evaluate_field(p, field_mode, grid_n, box_max);
 
-        if (val > threshold) {
-            let density = (val - threshold) * density_s;
+        if (f.density_val > threshold) {
+            let density = (f.density_val - threshold) * density_s;
             let sample_alpha = 1.0 - exp(-density * dt);
-            let norm_val = clamp((val - threshold) / max(threshold * 8.0, 0.02), 0.0, 1.0);
-            let col = get_color(norm_val, palette_idx);
+            let norm_val = clamp((f.density_val - threshold) / max(threshold * 8.0, 0.02), 0.0, 1.0);
+            let col = get_color(norm_val, palette_idx, f.color_val, f.is_cyclic);
 
             // Front-to-back compositing
             acc_color = acc_color + (1.0 - acc_alpha) * col * sample_alpha;
@@ -227,10 +375,20 @@ VolumeRenderer::VolumeRenderer()
 
     u_params_ = pipeline_->addUniform(0, sizeof(UniformData));
 
-    // Storage buffer binding 1: will be bound to velocity field buffer
-    // Initialize layout with minBindingSize = 0 to allow binding any resolution (32^3 to 256^3)
+    // Storage buffer bindings:
+    // Binding 1: velocity field (vec4<f32> * N^3)
+    // Binding 2: ψ₁ spinor component (vec2<f32> * N^3)
+    // Binding 3: ψ₂ spinor component (vec2<f32> * N^3)
     s_velocity_ = pipeline_->addStorage(1, 16, nullptr, /*readOnly=*/true);
-    pipeline_->uniforms.layouts.back().buffer.minBindingSize = 0;
+    s_psi1_     = pipeline_->addStorage(2, 16, nullptr, /*readOnly=*/true);
+    s_psi2_     = pipeline_->addStorage(3, 16, nullptr, /*readOnly=*/true);
+
+    // Ensure minBindingSize = 0 for arbitrary resolutions (32^3 to 256^3)
+    for (auto& layout : pipeline_->uniforms.layouts) {
+        if (layout.binding >= 1) {
+            layout.buffer.minBindingSize = 0;
+        }
+    }
 
     // Premultiplied alpha blending for luminous volumetric smoke
     pipeline_->customBlend = true;
@@ -250,21 +408,26 @@ VolumeRenderer::~VolumeRenderer()
 
 void VolumeRenderer::render(wgfx::RenderPass* pass,
                             wgpu::Buffer vel_buffer,
+                            wgpu::Buffer psi1_buffer,
+                            wgpu::Buffer psi2_buffer,
                             int grid_n,
                             float domain_size,
                             const glm::mat4& inv_view_proj,
                             const glm::vec3& cam_pos,
                             const VolumeRenderParams& params)
 {
-    if (!pass || !vel_buffer || grid_n <= 0) return;
+    if (!pass || !vel_buffer || !psi1_buffer || !psi2_buffer || grid_n <= 0) return;
 
-    // Recreate bind group whenever buffer or resolution changes
-    if (bound_buffer_ != vel_buffer || bound_grid_n_ != grid_n) {
+    // Recreate bind group whenever buffers or resolution change
+    if (bound_buffer_ != vel_buffer || bound_psi1_ != psi1_buffer || bound_psi2_ != psi2_buffer || bound_grid_n_ != grid_n) {
         bound_buffer_ = vel_buffer;
+        bound_psi1_   = psi1_buffer;
+        bound_psi2_   = psi2_buffer;
         bound_grid_n_ = grid_n;
-        const size_t size = static_cast<size_t>(grid_n) * grid_n * grid_n * sizeof(float) * 4;
+        const size_t vel_size  = static_cast<size_t>(grid_n) * grid_n * grid_n * sizeof(float) * 4;
+        const size_t cplx_size = static_cast<size_t>(grid_n) * grid_n * grid_n * sizeof(float) * 2;
 
-        std::vector<wgpu::BindGroupEntry> bg_entries(2);
+        std::vector<wgpu::BindGroupEntry> bg_entries(4);
         bg_entries[0].binding = 0;
         bg_entries[0].buffer  = u_params_->buffer;
         bg_entries[0].offset  = 0;
@@ -273,7 +436,17 @@ void VolumeRenderer::render(wgfx::RenderPass* pass,
         bg_entries[1].binding = 1;
         bg_entries[1].buffer  = vel_buffer;
         bg_entries[1].offset  = 0;
-        bg_entries[1].size    = size;
+        bg_entries[1].size    = vel_size;
+
+        bg_entries[2].binding = 2;
+        bg_entries[2].buffer  = psi1_buffer;
+        bg_entries[2].offset  = 0;
+        bg_entries[2].size    = cplx_size;
+
+        bg_entries[3].binding = 3;
+        bg_entries[3].buffer  = psi2_buffer;
+        bg_entries[3].offset  = 0;
+        bg_entries[3].size    = cplx_size;
 
         wgpu::BindGroupDescriptor bgDesc{};
         bgDesc.layout     = pipeline_->uniforms.bindGroupLayout;
