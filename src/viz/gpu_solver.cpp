@@ -723,14 +723,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     bg_phase_vel_ = wgfx::device.createBindGroup(bg_pv_desc);
 
     // -------------------------------------------------------------
-    // 7. Particle Advection Shader (RK2 Midpoint on GPU)
+    // 7. Particle Advection Shader (RK2 Midpoint on GPU with Psi Drift)
     // -------------------------------------------------------------
     std::string adv_wgsl = std::string(kCommonHeader) + R"wgsl(
 struct AdvectParams {
     dt: f32,
     num_particles: u32,
-    _pad0: u32,
-    _pad1: u32,
+    psi_drift: f32,
+    color_mode: u32,
+    fade_non_core: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 };
 
 struct ParticleData {
@@ -742,13 +746,14 @@ struct ParticleData {
 @group(0) @binding(1) var<uniform> u_adv: AdvectParams;
 @group(0) @binding(2) var<storage, read> s_vel: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read_write> s_particles: array<ParticleData>;
+@group(0) @binding(4) var<storage, read> s_psi1: array<vec2<f32>>;
+@group(0) @binding(5) var<storage, read> s_psi2: array<vec2<f32>>;
 
 fn sample_vel_trilinear(pos: vec3<f32>) -> vec3<f32> {
     let lx = u_sim.lx;
     let ly = u_sim.ly;
     let lz = u_sim.lz;
 
-    // Periodic wrap into [0, L)
     let wx = wrap_pos(pos.x, lx);
     let wy = wrap_pos(pos.y, ly);
     let wz = wrap_pos(pos.z, lz);
@@ -793,6 +798,148 @@ fn sample_vel_trilinear(pos: vec3<f32>) -> vec3<f32> {
     return mix(c0, c1, tz);
 }
 
+fn sample_psi1_trilinear(pos: vec3<f32>) -> vec2<f32> {
+    let lx = u_sim.lx;
+    let ly = u_sim.ly;
+    let lz = u_sim.lz;
+
+    let wx = wrap_pos(pos.x, lx);
+    let wy = wrap_pos(pos.y, ly);
+    let wz = wrap_pos(pos.z, lz);
+
+    let dx = lx / f32(u_sim.nx);
+    let dy = ly / f32(u_sim.ny);
+    let dz = lz / f32(u_sim.nz);
+
+    let fx = wx / dx;
+    let fy = wy / dy;
+    let fz = wz / dz;
+
+    let i0 = u32(floor(fx)) % u_sim.nx;
+    let j0 = u32(floor(fy)) % u_sim.ny;
+    let k0 = u32(floor(fz)) % u_sim.nz;
+
+    let i1 = (i0 + 1u) % u_sim.nx;
+    let j1 = (j0 + 1u) % u_sim.ny;
+    let k1 = (k0 + 1u) % u_sim.nz;
+
+    let tx = fx - floor(fx);
+    let ty = fy - floor(fy);
+    let tz = fz - floor(fz);
+
+    let c000 = s_psi1[cell_index(i0, j0, k0, u_sim.nx, u_sim.ny)];
+    let c100 = s_psi1[cell_index(i1, j0, k0, u_sim.nx, u_sim.ny)];
+    let c010 = s_psi1[cell_index(i0, j1, k0, u_sim.nx, u_sim.ny)];
+    let c110 = s_psi1[cell_index(i1, j1, k0, u_sim.nx, u_sim.ny)];
+    let c001 = s_psi1[cell_index(i0, j0, k1, u_sim.nx, u_sim.ny)];
+    let c101 = s_psi1[cell_index(i1, j0, k1, u_sim.nx, u_sim.ny)];
+    let c011 = s_psi1[cell_index(i0, j1, k1, u_sim.nx, u_sim.ny)];
+    let c111 = s_psi1[cell_index(i1, j1, k1, u_sim.nx, u_sim.ny)];
+
+    let c00 = mix(c000, c100, tx);
+    let c10 = mix(c010, c110, tx);
+    let c01 = mix(c001, c101, tx);
+    let c11 = mix(c011, c111, tx);
+
+    let c0 = mix(c00, c10, ty);
+    let c1 = mix(c01, c11, ty);
+
+    return mix(c0, c1, tz);
+}
+
+fn sample_psi2_trilinear(pos: vec3<f32>) -> vec2<f32> {
+    let lx = u_sim.lx;
+    let ly = u_sim.ly;
+    let lz = u_sim.lz;
+
+    let wx = wrap_pos(pos.x, lx);
+    let wy = wrap_pos(pos.y, ly);
+    let wz = wrap_pos(pos.z, lz);
+
+    let dx = lx / f32(u_sim.nx);
+    let dy = ly / f32(u_sim.ny);
+    let dz = lz / f32(u_sim.nz);
+
+    let fx = wx / dx;
+    let fy = wy / dy;
+    let fz = wz / dz;
+
+    let i0 = u32(floor(fx)) % u_sim.nx;
+    let j0 = u32(floor(fy)) % u_sim.ny;
+    let k0 = u32(floor(fz)) % u_sim.nz;
+
+    let i1 = (i0 + 1u) % u_sim.nx;
+    let j1 = (j0 + 1u) % u_sim.ny;
+    let k1 = (k0 + 1u) % u_sim.nz;
+
+    let tx = fx - floor(fx);
+    let ty = fy - floor(fy);
+    let tz = fz - floor(fz);
+
+    let c000 = s_psi2[cell_index(i0, j0, k0, u_sim.nx, u_sim.ny)];
+    let c100 = s_psi2[cell_index(i1, j0, k0, u_sim.nx, u_sim.ny)];
+    let c010 = s_psi2[cell_index(i0, j1, k0, u_sim.nx, u_sim.ny)];
+    let c110 = s_psi2[cell_index(i1, j1, k0, u_sim.nx, u_sim.ny)];
+    let c001 = s_psi2[cell_index(i0, j0, k1, u_sim.nx, u_sim.ny)];
+    let c101 = s_psi2[cell_index(i1, j0, k1, u_sim.nx, u_sim.ny)];
+    let c011 = s_psi2[cell_index(i0, j1, k1, u_sim.nx, u_sim.ny)];
+    let c111 = s_psi2[cell_index(i1, j1, k1, u_sim.nx, u_sim.ny)];
+
+    let c00 = mix(c000, c100, tx);
+    let c10 = mix(c010, c110, tx);
+    let c01 = mix(c001, c101, tx);
+    let c11 = mix(c011, c111, tx);
+
+    let c0 = mix(c00, c10, ty);
+    let c1 = mix(c01, c11, ty);
+
+    return mix(c0, c1, tz);
+}
+
+fn sample_psi1_density(pos: vec3<f32>) -> f32 {
+    let p = sample_psi1_trilinear(pos);
+    return dot(p, p);
+}
+
+fn sample_density_grad(pos: vec3<f32>) -> vec3<f32> {
+    let dx = u_sim.lx / f32(u_sim.nx);
+    let dy = u_sim.ly / f32(u_sim.ny);
+    let dz = u_sim.lz / f32(u_sim.nz);
+
+    let gx = (sample_psi1_density(pos + vec3<f32>(dx, 0.0, 0.0)) - sample_psi1_density(pos - vec3<f32>(dx, 0.0, 0.0))) / (2.0 * dx);
+    let gy = (sample_psi1_density(pos + vec3<f32>(0.0, dy, 0.0)) - sample_psi1_density(pos - vec3<f32>(0.0, dy, 0.0))) / (2.0 * dy);
+    let gz = (sample_psi1_density(pos + vec3<f32>(0.0, 0.0, dz)) - sample_psi1_density(pos - vec3<f32>(0.0, 0.0, dz))) / (2.0 * dz);
+    return vec3<f32>(gx, gy, gz);
+}
+
+fn get_effective_velocity(pos: vec3<f32>) -> vec3<f32> {
+    var v = sample_vel_trilinear(pos);
+    if (abs(u_adv.psi_drift) > 1e-4) {
+        let grad = sample_density_grad(pos);
+        let raw = u_adv.psi_drift * grad;
+        let dlen = length(raw);
+        let max_speed = 5.0;
+        let drift = select(raw, raw * (max_speed / dlen), dlen > max_speed);
+        v = v + drift;
+    }
+    return v;
+}
+
+fn hsv2rgb(h: f32, s: f32, v: f32) -> vec3<f32> {
+    let c = v * s;
+    let h6 = (h - floor(h)) * 6.0;
+    let x = c * (1.0 - abs(h6 % 2.0 - 1.0));
+    var rgb = vec3<f32>(0.0);
+    if (h6 < 1.0) { rgb = vec3<f32>(c, x, 0.0); }
+    else if (h6 < 2.0) { rgb = vec3<f32>(x, c, 0.0); }
+    else if (h6 < 3.0) { rgb = vec3<f32>(0.0, c, x); }
+    else if (h6 < 4.0) { rgb = vec3<f32>(0.0, x, c); }
+    else if (h6 < 5.0) { rgb = vec3<f32>(x, 0.0, c); }
+    else { rgb = vec3<f32>(c, 0.0, x); }
+    let m = v - c;
+    return rgb + vec3<f32>(m);
+}
+
 @compute @workgroup_size(256, 1, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let p_idx = gid.x;
@@ -801,10 +948,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var p = s_particles[p_idx];
     let pos0 = p.pos.xyz;
 
-    // RK2 midpoint step
-    let v0 = sample_vel_trilinear(pos0);
+    // RK2 midpoint step with effective velocity
+    let v0 = get_effective_velocity(pos0);
     let pos_mid = pos0 + 0.5 * u_adv.dt * v0;
-    let v1 = sample_vel_trilinear(pos_mid);
+    let v1 = get_effective_velocity(pos_mid);
     var pos1 = pos0 + u_adv.dt * v1;
 
     // Wrap into periodic box [0, L)
@@ -812,7 +959,52 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     pos1.y = wrap_pos(pos1.y, u_sim.ly);
     pos1.z = wrap_pos(pos1.z, u_sim.lz);
 
-    p.pos = vec4<f32>(pos1, 1.0);
+    p.pos = vec4<f32>(pos1, p.pos.w);
+
+    // Color and alpha updates
+    let cm = u_adv.color_mode;
+    let p1 = sample_psi1_trilinear(pos1);
+    let rho1 = dot(p1, p1);
+    let smoke_density = clamp(1.0 - rho1, 0.0, 1.0); // 1 at core, 0 outside
+
+    if (cm == 1u) {
+        // Smoke Density (Core Glow):
+        let base_col = mix(vec3<f32>(0.02, 0.08, 0.18), vec3<f32>(0.15, 0.85, 1.0), pow(smoke_density, 0.6));
+        let glow = mix(base_col, vec3<f32>(1.0, 1.0, 1.0), pow(smoke_density, 2.5));
+        p.col = vec4<f32>(glow, p.col.a);
+    } else if (cm == 2u) {
+        // Psi_1 Phase: arg(psi1)
+        let phase = atan2(p1.y, p1.x);
+        let hue = (phase + 3.1415926535) / (2.0 * 3.1415926535);
+        p.col = vec4<f32>(hsv2rgb(hue, 0.9, 1.0), p.col.a);
+    } else if (cm == 3u) {
+        // Spinor Relative Phase: arg(psi1* psi2)
+        let p2 = sample_psi2_trilinear(pos1);
+        let cross_re = p1.x * p2.x + p1.y * p2.y;
+        let cross_im = p1.x * p2.y - p1.y * p2.x;
+        let phase = atan2(cross_im, cross_re);
+        let hue = (phase + 3.1415926535) / (2.0 * 3.1415926535);
+        p.col = vec4<f32>(hsv2rgb(hue, 0.9, 1.0), p.col.a);
+    } else if (cm == 4u) {
+        // Velocity Speed |v|
+        let spd = length(sample_vel_trilinear(pos1));
+        let norm_spd = clamp(spd / 2.5, 0.0, 1.0);
+        let hue = (1.0 - norm_spd) * 0.66;
+        p.col = vec4<f32>(hsv2rgb(hue, 0.9, 1.0), p.col.a);
+    } else if (cm == 0u) {
+        // Restore original unpacked scene ink color
+        let orig_u = bitcast<u32>(p.pos.w);
+        if (orig_u != 0u) {
+            p.col = vec4<f32>(unpack4x8unorm(orig_u).rgb, p.col.a);
+        }
+    }
+
+    if (u_adv.fade_non_core > 0.5) {
+        p.col.a = smoothstep(0.02, 0.35, smoke_density);
+    } else {
+        p.col.a = 1.0;
+    }
+
     s_particles[p_idx] = p;
 }
 )wgsl";
@@ -822,7 +1014,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         uniform_entry(0),
         uniform_entry(1),
         storage_entry(2, /*readOnly=*/true),
-        storage_entry(3, /*readOnly=*/false)
+        storage_entry(3, /*readOnly=*/false),
+        storage_entry(4, /*readOnly=*/true),
+        storage_entry(5, /*readOnly=*/true)
     };
     wgpu::BindGroupLayoutDescriptor bgl_adv_desc{};
     bgl_adv_desc.entryCount = bgl_adv_entries.size();
@@ -965,31 +1159,42 @@ void GpuFluidSolver::step(double dt, double hbar)
     commands.release();
 }
 
-void GpuFluidSolver::advect_particles(wgpu::Buffer particle_buffer, std::size_t particle_count, double dt)
+void GpuFluidSolver::advect_particles(wgpu::Buffer particle_buffer, std::size_t particle_count,
+                                      const ParticleAdvectParams& params)
 {
     if (!particle_buffer || particle_count == 0) return;
 
     struct AdvectParams {
         float    dt;
         uint32_t num_particles;
+        float    psi_drift;
+        uint32_t color_mode;
+        float    fade_non_core;
         uint32_t pad0;
         uint32_t pad1;
+        uint32_t pad2;
     };
     AdvectParams adv_params{
-        static_cast<float>(dt),
+        params.dt,
         static_cast<uint32_t>(particle_count),
-        0, 0
+        params.psi_drift,
+        static_cast<uint32_t>(params.color_mode),
+        params.fade_non_core ? 1.0f : 0.0f,
+        0, 0, 0
     };
     wgfx::queue.writeBuffer(u_adv_param_, 0, &adv_params, sizeof(adv_params));
 
     const size_t vel_bytes = static_cast<size_t>(grid_n_) * grid_n_ * grid_n_ * sizeof(float) * 4;
+    const size_t psi_bytes = static_cast<size_t>(grid_n_) * grid_n_ * grid_n_ * sizeof(float) * 2;
     const size_t part_bytes = particle_count * sizeof(float) * 8; // 32 bytes per GpuParticle
 
     std::vector<wgpu::BindGroupEntry> entries = {
         bg_buf_entry(0, u_sim_param_, 64),
         bg_buf_entry(1, u_adv_param_, 64),
         bg_buf_entry(2, b_vel_, vel_bytes),
-        bg_buf_entry(3, particle_buffer, part_bytes)
+        bg_buf_entry(3, particle_buffer, part_bytes),
+        bg_buf_entry(4, b_psi1_, psi_bytes),
+        bg_buf_entry(5, b_psi2_, psi_bytes)
     };
     wgpu::BindGroupDescriptor bgDesc{};
     bgDesc.layout = bgl_advect_;

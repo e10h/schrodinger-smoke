@@ -39,7 +39,7 @@ struct VertexInput {
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
-    @location(1) color: vec3<f32>,
+    @location(1) color: vec4<f32>,
 };
 
 @vertex
@@ -68,7 +68,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.position = center_clip + vec4<f32>(offset_x, offset_y, 0.0, 0.0);
     out.uv = corner + vec2<f32>(0.5, 0.5);
-    out.color = p.col.rgb;
+    out.color = p.col;
     return out;
 }
 
@@ -80,12 +80,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    // Exact OpenGL fragment equation:
-    // float a = smoothstep(0.5, 0.0, r);
-    // out_color = vec4(v_color, a * 0.22);
-    // Combined with glBlendFunc(GL_SRC_ALPHA, GL_ONE)
-    let a = smoothstep(0.5, 0.0, r) * 0.22;
-    return vec4<f32>(in.color, a);
+    // Exact OpenGL fragment equation modulated by per-particle alpha
+    let a = smoothstep(0.5, 0.0, r) * 0.22 * in.color.a;
+    return vec4<f32>(in.color.rgb, a);
 }
 )wgsl";
 
@@ -134,17 +131,28 @@ void ParticleRenderer::upload(const ParticleSystem& ps)
         scratch_particles_.resize(buffer_capacity_);
     }
 
+    const bool has_cols = ps.has_colors();
     #pragma omp parallel for schedule(static)
     for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(particle_count_); ++i) {
+        const float r = has_cols ? ps.r[i] : 0.2f;
+        const float g = has_cols ? ps.g[i] : 0.8f;
+        const float b = has_cols ? ps.b[i] : 1.0f;
+        uint32_t packed = static_cast<uint8_t>(std::clamp(r * 255.0f, 0.0f, 255.0f)) |
+                         (static_cast<uint8_t>(std::clamp(g * 255.0f, 0.0f, 255.0f)) << 8) |
+                         (static_cast<uint8_t>(std::clamp(b * 255.0f, 0.0f, 255.0f)) << 16) |
+                         (0xFFu << 24);
+        float packed_f;
+        std::memcpy(&packed_f, &packed, sizeof(float));
+
         scratch_particles_[i] = {
             static_cast<float>(ps.x[i]),
             static_cast<float>(ps.y[i]),
             static_cast<float>(ps.z[i]),
-            0.0f,
-            ps.r[i],
-            ps.g[i],
-            ps.b[i],
-            0.0f
+            packed_f,
+            r,
+            g,
+            b,
+            1.0f
         };
     }
 

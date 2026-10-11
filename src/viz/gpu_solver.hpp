@@ -33,6 +33,21 @@ namespace viz {
 
 struct ParticleSystem;
 
+enum class ParticleColorMode : uint32_t {
+    Default        = 0,
+    SmokeDensity   = 1,
+    Psi1Phase      = 2,
+    SpinorPhase    = 3,
+    VelocitySpeed  = 4
+};
+
+struct ParticleAdvectParams {
+    float             dt            = 0.016f;
+    float             psi_drift     = 0.0f;     ///< <0: attract to vortex core (|psi1|^2 -> 0), >0: attract to bulk
+    ParticleColorMode color_mode    = ParticleColorMode::Default;
+    bool              fade_non_core = false;    ///< Fade particles with low smoke density
+};
+
 /**
  * @brief GPU-accelerated ISF fluid simulation and particle advection engine.
  */
@@ -73,12 +88,19 @@ public:
     void step(double dt, double hbar);
 
     /**
-     * @brief Advect particles on GPU using the computed velocity field.
+     * @brief Advect particles on GPU using the computed velocity field and optional psi drift.
      * @param particle_buffer WebGPU buffer containing ParticleData array.
      * @param particle_count  Number of active particles.
-     * @param dt              Time step.
+     * @param params          Particle advection and styling parameters.
      */
-    void advect_particles(wgpu::Buffer particle_buffer, std::size_t particle_count, double dt);
+    void advect_particles(wgpu::Buffer particle_buffer, std::size_t particle_count,
+                          const ParticleAdvectParams& params);
+
+    void advect_particles(wgpu::Buffer particle_buffer, std::size_t particle_count, double dt) {
+        ParticleAdvectParams p;
+        p.dt = static_cast<float>(dt);
+        advect_particles(particle_buffer, particle_count, p);
+    }
 
     /// @brief Storage buffer holding the 3D Eulerian velocity field (vec4<f32> * N^3).
     [[nodiscard]] wgpu::Buffer velocity_buffer() const noexcept { return b_vel_; }

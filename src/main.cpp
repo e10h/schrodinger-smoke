@@ -171,11 +171,32 @@ void seed_particles_two_balls(viz::ParticleSystem& ps,
     seed_ball(half, n_particles, cx2, cy, cz, 0.20f, 0.45f, 1.00f);
 }
 
+void seed_particles_uniform(viz::ParticleSystem& ps,
+                            std::mt19937& rng,
+                            int n_particles)
+{
+    resize_particles(ps, static_cast<std::size_t>(n_particles));
+    std::uniform_real_distribution<double> dist(0.0, kDomainSize);
+    for (int i = 0; i < n_particles; ++i) {
+        ps.x[i] = dist(rng);
+        ps.y[i] = dist(rng);
+        ps.z[i] = dist(rng);
+        ps.r[i] = 0.40f;
+        ps.g[i] = 0.80f;
+        ps.b[i] = 1.00f;
+    }
+}
+
 } // namespace
 
 enum class RenderMode : int {
     VolumeRaymarch = 0, ///< Volumetric raymarching of Eulerian fields (default)
     TracerParticles = 1, ///< Passive Lagrangian tracer particles
+};
+
+enum class SeedPattern : int {
+    SceneGeometry = 0,
+    UniformBox    = 1
 };
 
 int main(int /*argc*/, char** /*argv*/)
@@ -200,6 +221,9 @@ try {
     RenderMode render_mode = RenderMode::VolumeRaymarch;
     viz::VolumeRenderParams vol_params;
 
+    viz::ParticleAdvectParams part_params;
+    SeedPattern seed_pattern = SeedPattern::SceneGeometry;
+
     viz::ParticleSystem ps;
     std::mt19937 rng(0xC0FFEEu);
 
@@ -209,18 +233,24 @@ try {
     float  point_size = 4.0f;
     bool   pause_sim  = false;
 
-    auto reset_scene = [&]() {
-        switch (scene) {
-        case Scene::VortexRing:
-            reset_vortex_ring(g);
-            seed_particles_ring(ps, rng, n_particles);
-            break;
-        case Scene::CollidingBalls:
-            reset_two_balls(g, hbar);
-            seed_particles_two_balls(ps, rng, n_particles);
-            break;
+    auto seed_active_particles = [&]() {
+        if (seed_pattern == SeedPattern::UniformBox) {
+            seed_particles_uniform(ps, rng, n_particles);
+        } else {
+            switch (scene) {
+            case Scene::VortexRing:     seed_particles_ring(ps, rng, n_particles);      break;
+            case Scene::CollidingBalls: seed_particles_two_balls(ps, rng, n_particles); break;
+            }
         }
         renderer.upload(ps);
+    };
+
+    auto reset_scene = [&]() {
+        switch (scene) {
+        case Scene::VortexRing:     reset_vortex_ring(g);     break;
+        case Scene::CollidingBalls: reset_two_balls(g, hbar); break;
+        }
+        seed_active_particles();
         gpu_solver.upload_grid(g);
         if (use_gpu) {
             // Initial micro-step so velocity buffer is immediately ready for raymarching
@@ -263,8 +293,10 @@ try {
             if (use_gpu) {
                 gpu_solver.step(dt, hbar);
                 if (render_mode == RenderMode::TracerParticles) {
+                    part_params.dt = static_cast<float>(dt);
                     gpu_solver.advect_particles(renderer.particle_buffer(),
-                                                renderer.particle_count(), dt);
+                                                renderer.particle_count(),
+                                                part_params);
                 }
             } else {
                 isf::schrodinger_step(g, dt, hbar);
@@ -374,9 +406,54 @@ try {
             dt = dt_f;
         }
         if (render_mode == RenderMode::TracerParticles) {
-            ImGui::SliderFloat("point size", &point_size, 1.0f, 12.0f, "%.1f");
+            ImGui::SliderFloat("point size", &point_size, 1.0f, 16.0f, "%.1f");
             if (ImGui::SliderInt("particles", &n_particles, 10000, 600000)) {
                 // will take effect on next reset particles
+            }
+
+            ImGui::SeparatorText("Psi Particle Motion & Visuals");
+
+            static const char* color_mode_labels[] = {
+                "Default (Scene Ink)",
+                "Vortex Core Glow (1 - |psi1|^2)",
+                "Psi_1 Phase arg(psi1)",
+                "Spinor Relative Phase",
+                "Velocity Speed |v|"
+            };
+            int cm_idx = static_cast<int>(part_params.color_mode);
+            if (ImGui::Combo("particle color", &cm_idx, color_mode_labels, IM_ARRAYSIZE(color_mode_labels))) {
+                part_params.color_mode = static_cast<viz::ParticleColorMode>(cm_idx);
+            }
+
+            ImGui::SliderFloat("psi drift", &part_params.psi_drift, -3.0f, 3.0f, "%.2f");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("< 0: Attract into vortex filaments (|psi1|^2 -> 0)\n"
+                                  "  0: Pure fluid tracer flow\n"
+                                  "> 0: Attract into fluid bulk (|psi1|^2 -> 1)");
+            }
+
+            if (ImGui::SmallButton("Trap in Core (-1.0)")) {
+                part_params.psi_drift = -1.0f;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Pure Flow (0.0)")) {
+                part_params.psi_drift = 0.0f;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Repel (+1.0)")) {
+                part_params.psi_drift = 1.0f;
+            }
+
+            ImGui::Checkbox("fade non-core particles", &part_params.fade_non_core);
+
+            static const char* seed_labels[] = {
+                "Scene Geometry (Toroid / Spheres)",
+                "Uniform Box Fill (Watch Ring Condense)"
+            };
+            int s_idx = static_cast<int>(seed_pattern);
+            if (ImGui::Combo("seed pattern", &s_idx, seed_labels, IM_ARRAYSIZE(seed_labels))) {
+                seed_pattern = static_cast<SeedPattern>(s_idx);
+                seed_active_particles();
             }
         }
         ImGui::Checkbox("pause", &pause_sim);
@@ -389,11 +466,7 @@ try {
         }
         ImGui::SameLine();
         if (ImGui::Button("reset particles")) {
-            switch (scene) {
-            case Scene::VortexRing:    seed_particles_ring(ps, rng, n_particles);      break;
-            case Scene::CollidingBalls:seed_particles_two_balls(ps, rng, n_particles); break;
-            }
-            renderer.upload(ps);
+            seed_active_particles();
         }
         ImGui::SameLine();
         if (ImGui::Button("reset all")) {
