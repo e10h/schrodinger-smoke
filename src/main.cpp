@@ -268,7 +268,9 @@ try {
     viz::GifRecorder      recorder;
     viz::OrbitCamera      cam(
         glm::vec3{ 0.5f * float(kDomainSize) },
-        1.6f * float(kDomainSize));
+        1.55f * float(kDomainSize));
+    // Orbit camera to view head-on collision crown
+    cam.orbit(0.45f, 0.22f);
 
     int    grid_n      = kInitialGridN;
     int    n_particles = kInitialParticles;
@@ -288,7 +290,7 @@ try {
     viz::ParticleSystem ps;
     std::mt19937 rng(0xC0FFEEu);
 
-    Scene  scene = Scene::VortexRing;
+    Scene  scene = Scene::CollidingBalls;
     double hbar  = kHbarDefault;
     double dt    = 1.0 / 60.0;
     float  point_size = 4.0f;
@@ -431,7 +433,8 @@ try {
                 "Fire Plasma",
                 "Deep Ocean",
                 "Wispy Smoke",
-                "Spectral Rainbow (Phase)"
+                "Spectral Rainbow (Phase)",
+                "SIGGRAPH 2016 Collision (Red/Blue)"
             };
             int pal_idx = static_cast<int>(vol_params.palette);
             if (ImGui::Combo("palette", &pal_idx, pal_labels, IM_ARRAYSIZE(pal_labels))) {
@@ -441,6 +444,13 @@ try {
             ImGui::SliderFloat("density", &vol_params.density_scale, 1.0f, 60.0f, "%.1f");
             ImGui::SliderFloat("threshold", &vol_params.threshold, 0.001f, 0.5f, "%.3f");
             ImGui::SliderFloat("ray steps", &vol_params.step_count, 32.0f, 320.0f, "%.0f");
+            ImGui::SliderFloat("self-shadow", &vol_params.shadow_strength, 0.0f, 1.5f, "%.2f");
+            if (ImGui::TreeNode("Key Light Direction")) {
+                ImGui::SliderFloat("light X", &vol_params.light_x, -1.0f, 1.0f, "%.2f");
+                ImGui::SliderFloat("light Y", &vol_params.light_y, 0.1f, 1.0f, "%.2f");
+                ImGui::SliderFloat("light Z", &vol_params.light_z, -1.0f, 1.0f, "%.2f");
+                ImGui::TreePop();
+            }
         }
 
         static const int  res_options[] = { 32, 64, 128, 256 };

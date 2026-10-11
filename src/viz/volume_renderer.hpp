@@ -27,19 +27,24 @@ enum class VolumeFieldMode : int {
 };
 
 enum class VolumePalette : int {
-    NeonCyan     = 0, ///< Electric cyan/blue quantum filaments
-    FirePlasma   = 1, ///< Hot thermal flame / plasma
-    DeepOcean    = 2, ///< Deep marine azure to seafoam
-    WispySmoke   = 3, ///< Classic realistic additive smoke
-    PhaseRainbow = 4, ///< Cyclic HSV spectral rainbow for quantum phase
+    NeonCyan          = 0, ///< Electric cyan/blue quantum filaments
+    FirePlasma        = 1, ///< Hot thermal flame / plasma
+    DeepOcean         = 2, ///< Deep marine azure to seafoam
+    WispySmoke        = 3, ///< Classic realistic additive smoke
+    PhaseRainbow      = 4, ///< Cyclic HSV spectral rainbow for quantum phase
+    SiggraphCollision = 5, ///< SIGGRAPH 2016 Head-on collision (Red & Blue dye mixing into Purple)
 };
 
 struct VolumeRenderParams {
-    VolumeFieldMode field_mode    = VolumeFieldMode::VorticityMagnitude;
-    VolumePalette   palette       = VolumePalette::NeonCyan;
-    float           density_scale = 10.0f;
-    float           threshold     = 0.05f;
-    float           step_count    = 160.0f;
+    VolumeFieldMode field_mode      = VolumeFieldMode::VorticityMagnitude;
+    VolumePalette   palette         = VolumePalette::SiggraphCollision; ///< Default to iconic SIGGRAPH 2016 look
+    float           density_scale   = 18.0f;
+    float           threshold       = 0.025f;
+    float           step_count      = 160.0f;
+    float           shadow_strength = 0.80f; ///< Volumetric self-shadowing (0 to 1.5)
+    float           light_x         = 0.40f; ///< Key light direction X
+    float           light_y         = 0.85f; ///< Key light direction Y
+    float           light_z         = 0.45f; ///< Key light direction Z
 };
 
 class VolumeRenderer {
@@ -79,6 +84,7 @@ private:
         glm::vec4 cam_pos;       // xyz: cam_pos, w: grid_n
         glm::vec4 domain_params; // xyz: domain size L, w: num_steps
         glm::vec4 render_params; // x: field_mode, y: density_scale, z: threshold, w: palette
+        glm::vec4 light_params;  // xyz: light_dir, w: shadow_strength
     };
 
     wgfx::Pipeline* pipeline_      = nullptr;

@@ -17,6 +17,7 @@ struct VolumeUniforms {
     cam_pos: vec4<f32>,       // xyz: cam_pos, w: grid_n
     domain_params: vec4<f32>, // xyz: domain size L, w: num_steps
     render_params: vec4<f32>, // x: field_mode, y: density_scale, z: threshold, w: palette
+    light_params: vec4<f32>,  // xyz: light_dir, w: shadow_strength
 };
 
 @group(0) @binding(0) var<uniform> u_vol: VolumeUniforms;
@@ -260,7 +261,69 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> vec3<f32> {
     return vec3<f32>(c + m, m, x + m);
 }
 
-fn get_color(t_norm: f32, palette: i32, phase_norm: f32, is_cyclic: bool) -> vec3<f32> {
+fn get_field_density(p: vec3<f32>, mode: i32, n: u32, l: vec3<f32>) -> f32 {
+    let f = evaluate_field(p, mode, n, l);
+    return f.density_val;
+}
+
+fn compute_volumetric_shadow(p: vec3<f32>, mode: i32, n: u32, l: vec3<f32>, light_dir: vec3<f32>,
+                             threshold: f32, density_s: f32, strength: f32) -> f32 {
+    if (strength <= 0.01) { return 1.0; }
+    let shadow_step = l.x / 20.0;
+    var tau = 0.0;
+    for (var i = 1; i <= 5; i = i + 1) {
+        let sp = p + f32(i) * shadow_step * light_dir;
+        if (sp.x >= 0.0 && sp.x <= l.x &&
+            sp.y >= 0.0 && sp.y <= l.y &&
+            sp.z >= 0.0 && sp.z <= l.z) {
+            let dens = get_field_density(sp, mode, n, l);
+            if (dens > threshold) {
+                tau = tau + (dens - threshold) * density_s * shadow_step;
+            }
+        }
+    }
+    return exp(-tau * strength * 2.2);
+}
+
+fn compute_gradient_normal(p: vec3<f32>, mode: i32, n: u32, l: vec3<f32>) -> vec3<f32> {
+    let eps = l.x / f32(n) * 1.0;
+    let dx = get_field_density(p + vec3<f32>(eps, 0.0, 0.0), mode, n, l) -
+             get_field_density(p - vec3<f32>(eps, 0.0, 0.0), mode, n, l);
+    let dy = get_field_density(p + vec3<f32>(0.0, eps, 0.0), mode, n, l) -
+             get_field_density(p - vec3<f32>(0.0, eps, 0.0), mode, n, l);
+    let dz = get_field_density(p + vec3<f32>(0.0, 0.0, eps), mode, n, l) -
+             get_field_density(p - vec3<f32>(0.0, 0.0, eps), mode, n, l);
+    let g = vec3<f32>(dx, dy, dz);
+    let glen = length(g);
+    return select(vec3<f32>(0.0, 1.0, 0.0), -g / glen, glen > 1e-4);
+}
+
+fn get_color(t_norm: f32, palette: i32, phase_norm: f32, is_cyclic: bool, p: vec3<f32>, vel: vec3<f32>, l: vec3<f32>) -> vec3<f32> {
+    if (palette == 5) {
+        // SIGGRAPH 2016 Head-on collision (Red & Blue dye mixing into Purple)
+        // Left stream (p.x < 0.5, vel.x > 0) is vibrant magenta / red-pink
+        // Right stream (p.x > 0.5, vel.x < 0) is deep royal blue / cerulean
+        // Collision center mixes into deep violet / purple
+        let stream = (p.x / l.x - 0.5) * 3.5 + clamp(vel.x * 0.8, -0.8, 0.8);
+        let mix_factor = clamp(stream * 0.5 + 0.5, 0.0, 1.0);
+
+        let red_dye  = vec3<f32>(0.92, 0.16, 0.45); // vibrant magenta-red
+        let blue_dye = vec3<f32>(0.20, 0.42, 0.98); // deep royal blue
+        let purple   = vec3<f32>(0.58, 0.16, 0.82); // rich velvet purple
+
+        var base_col: vec3<f32>;
+        if (mix_factor < 0.45) {
+            base_col = mix(red_dye, purple, mix_factor / 0.45);
+        } else if (mix_factor > 0.55) {
+            base_col = mix(purple, blue_dye, (mix_factor - 0.55) / 0.45);
+        } else {
+            base_col = purple;
+        }
+
+        let core_boost = clamp(t_norm * 0.4, 0.0, 0.5);
+        return mix(base_col, vec3<f32>(1.0, 0.88, 0.95), core_boost);
+    }
+
     if (palette == 4 || (is_cyclic && palette == 0)) {
         // Phase Rainbow / Quantum Phase: cyclic spectral hues
         let ph = select(t_norm, phase_norm, is_cyclic);
@@ -305,7 +368,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let box_max = u_vol.domain_params.xyz;
 
     // Ray-box intersection (slab method)
-    // Avoid division by exact zero which yields NaNs
     let safe_rd = select(rd, vec3<f32>(1e-6), abs(rd) < vec3<f32>(1e-6));
     let inv_rd = 1.0 / safe_rd;
     let t0 = (box_min - ro) * inv_rd;
@@ -330,6 +392,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let threshold    = u_vol.render_params.z;
     let palette_idx  = i32(u_vol.render_params.w);
 
+    let light_dir       = normalize(u_vol.light_params.xyz);
+    let shadow_strength = u_vol.light_params.w;
+
     var acc_color = vec3<f32>(0.0);
     var acc_alpha = 0.0;
 
@@ -344,7 +409,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let density = (f.density_val - threshold) * density_s;
             let sample_alpha = 1.0 - exp(-density * dt);
             let norm_val = clamp((f.density_val - threshold) / max(threshold * 8.0, 0.02), 0.0, 1.0);
-            let col = get_color(norm_val, palette_idx, f.color_val, f.is_cyclic);
+
+            // Shading & illumination
+            let shadow = compute_volumetric_shadow(p, field_mode, grid_n, box_max, light_dir, threshold, density_s, shadow_strength);
+            let normal = compute_gradient_normal(p, field_mode, grid_n, box_max);
+            let ndotl  = clamp(dot(normal, light_dir), 0.0, 1.0);
+
+            let direct = (0.22 + 0.78 * ndotl) * shadow;
+            let fill   = 0.20 * clamp(dot(normal, vec3<f32>(-light_dir.x, -0.35, -light_dir.z)), 0.0, 1.0);
+            let rim    = pow(clamp(dot(rd, light_dir) * 0.5 + 0.5, 0.0, 1.0), 3.0) * 0.30 * shadow;
+            let illum  = direct + fill + rim;
+
+            let v_sample = sample_vel(p, grid_n, box_max);
+            let raw_col  = get_color(norm_val, palette_idx, f.color_val, f.is_cyclic, p, v_sample, box_max);
+            let col      = raw_col * illum;
 
             // Front-to-back compositing
             acc_color = acc_color + (1.0 - acc_alpha) * col * sample_alpha;
@@ -360,7 +438,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    return vec4<f32>(acc_color, acc_alpha);
+    // Studio dark gradient background
+    let bg_col = mix(vec3<f32>(0.07, 0.07, 0.08), vec3<f32>(0.015, 0.015, 0.02), clamp(rd.y * 0.5 + 0.5, 0.0, 1.0));
+    let final_rgb = acc_color + (1.0 - acc_alpha) * bg_col;
+
+    return vec4<f32>(final_rgb, 1.0);
 }
 )wgsl";
 
@@ -467,6 +549,9 @@ void VolumeRenderer::render(wgfx::RenderPass* pass,
                                  params.density_scale,
                                  params.threshold,
                                  static_cast<float>(params.palette));
+
+    glm::vec3 l_dir = glm::normalize(glm::vec3(params.light_x, params.light_y, params.light_z));
+    u.light_params   = glm::vec4(l_dir, params.shadow_strength);
 
     pipeline_->updateUniform(u_params_, reinterpret_cast<const float*>(&u));
     pass->draw(pipeline_);
