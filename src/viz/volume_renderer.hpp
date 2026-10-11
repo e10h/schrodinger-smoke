@@ -50,17 +50,17 @@ enum class PreviewResolution : int {
 struct VolumeRenderParams {
     VolumeFieldMode   field_mode       = VolumeFieldMode::VorticityMagnitude;
     VolumePalette     palette          = VolumePalette::SiggraphCollision; ///< Default to iconic SIGGRAPH 2016 look
-    float             density_scale    = 18.0f;
-    float             threshold        = 0.025f;
+    float             density_scale    = 60.0f;  ///< Default to 60.0
+    float             threshold        = 0.189f; ///< Default to 0.189
     float             step_count       = 160.0f;
-    float             shadow_strength  = 0.80f; ///< Volumetric self-shadowing (0 to 1.5)
-    float             light_x          = 0.40f; ///< Key light direction X
-    float             light_y          = 0.85f; ///< Key light direction Y
-    float             light_z          = 0.45f; ///< Key light direction Z
-    bool              preview_lighting = false; ///< Viewport preview: false = unlit (fast), true = lit (studio)
-    PreviewResolution preview_res      = PreviewResolution::p480; ///< Default to 480p for fast RT preview
-    float             preview_scale    = 0.50f; ///< Scale factor when preview_res == Custom (0.05x to 1.0x)
-    bool              filter_linear    = true;  ///< Upscaling filter: true = bilinear, false = nearest-neighbor
+    float             shadow_strength  = 1.50f;  ///< Default to 1.50
+    float             light_x          = 0.40f;  ///< Key light direction X
+    float             light_y          = 0.85f;  ///< Key light direction Y
+    float             light_z          = 0.45f;  ///< Key light direction Z
+    bool              preview_lighting = true;   ///< Default to preview lighting enabled
+    PreviewResolution preview_res      = PreviewResolution::p144; ///< Default to 144p [Pixel Art]
+    float             preview_scale    = 0.50f;  ///< Scale factor when preview_res == Custom (0.05x to 1.0x)
+    bool              filter_linear    = true;   ///< Upscaling filter: true = bilinear, false = nearest-neighbor
 };
 
 /**
@@ -132,7 +132,8 @@ public:
                                const VolumeRenderParams& params,
                                int width,
                                int height,
-                               const std::string& output_dir = "renders");
+                               const std::string& output_dir = "renders",
+                               const std::string& filename = "");
 
 private:
     void ensure_preview_texture(int w, int h, bool linear);

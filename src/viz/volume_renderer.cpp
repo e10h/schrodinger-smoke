@@ -856,7 +856,8 @@ std::string VolumeRenderer::render_to_file(wgpu::Buffer vel_buffer,
                                            const VolumeRenderParams& params,
                                            int width,
                                            int height,
-                                           const std::string& output_dir)
+                                           const std::string& output_dir,
+                                           const std::string& filename)
 {
     if (width <= 0 || height <= 0 || !vel_buffer || !psi1_buffer || !psi2_buffer || grid_n <= 0) {
         return {};
@@ -865,18 +866,22 @@ std::string VolumeRenderer::render_to_file(wgpu::Buffer vel_buffer,
     std::error_code ec;
     std::filesystem::create_directories(output_dir, ec);
 
-    // Find next available sequential filename
-    int index = 1;
     std::string out_path;
-    while (true) {
-        char buf[64];
-        std::snprintf(buf, sizeof(buf), "render_%04d.bmp", index);
-        auto p = std::filesystem::path(output_dir) / buf;
-        if (!std::filesystem::exists(p, ec)) {
-            out_path = p.string();
-            break;
+    if (!filename.empty()) {
+        out_path = (std::filesystem::path(output_dir) / filename).string();
+    } else {
+        // Find next available sequential filename
+        int index = 1;
+        while (true) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "render_%04d.bmp", index);
+            auto p = std::filesystem::path(output_dir) / buf;
+            if (!std::filesystem::exists(p, ec)) {
+                out_path = p.string();
+                break;
+            }
+            index++;
         }
-        index++;
     }
 
     // 1. Create offscreen render target texture

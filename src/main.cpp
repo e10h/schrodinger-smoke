@@ -48,7 +48,7 @@ inline void resize_particles(viz::ParticleSystem& ps, std::size_t n)
     ps.b.resize(n);
 }
 
-constexpr int    kInitialGridN     = 64;     ///< startup lattice size (power of 2)
+constexpr int    kInitialGridN     = 128;    ///< startup lattice size (power of 2)
 constexpr int    kInitialParticles = 150000; ///< startup tracer count
 constexpr double kDomainSize       = 1.0;    ///< physical domain (m)
 constexpr double kRingRadius       = 0.20;   ///< vortex ring radius (m)
@@ -301,9 +301,43 @@ try {
 
     Scene  scene = Scene::CollidingBalls;
     double hbar  = kHbarDefault;
-    double dt    = 1.0 / 60.0;
+    double dt    = 0.020;
     float  point_size = 4.0f;
     bool   pause_sim  = false;
+    int    sim_frame  = 0;
+
+    struct SequenceRenderJob {
+        bool active = false;
+        int  current_frame = 0;
+        int  start_frame = 0;
+        int  end_frame = 100;
+        int  render_grid_n = 512;
+        int  render_w = 1920;
+        int  render_h = 1080;
+        int  orig_grid_n = 128;
+        std::string out_dir;
+    };
+    SequenceRenderJob seq_job;
+    int  seq_range[2]    = { 0, 100 };
+    int  seq_grid_choice = 2; // 0: 128, 1: 256, 2: 512 (default to 512)
+    int  seq_res_choice  = 1; // 0: Native, 1: 1080p, 2: 720p, 3: 4K (default to 1080p)
+    bool pause_at_end    = false;
+
+    auto get_next_seq_dir = []() -> std::string {
+        std::error_code ec;
+        std::filesystem::create_directories("renders", ec);
+        int idx = 1;
+        while (true) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "seq_%04d", idx);
+            auto p = std::filesystem::path("renders") / buf;
+            if (!std::filesystem::exists(p, ec)) {
+                std::filesystem::create_directories(p, ec);
+                return p.string();
+            }
+            idx++;
+        }
+    };
 
     auto seed_active_particles = [&]() {
         if (seed_pattern == SeedPattern::UniformBox) {
@@ -320,6 +354,7 @@ try {
     };
 
     auto reset_scene = [&]() {
+        sim_frame = 0;
         switch (scene) {
         case Scene::VortexRing:     reset_vortex_ring(g);     break;
         case Scene::CollidingBalls: reset_two_balls(g, hbar); break;
@@ -388,26 +423,76 @@ try {
             cam.zoom(std::exp(-0.1f * inp.scroll_dy));
         }
 
-        // --- physics ---
-        if (!pause_sim) {
-            if (use_gpu) {
-                gpu_solver.step(dt, hbar);
-                if (render_mode == RenderMode::TracerParticles) {
-                    part_params.dt = static_cast<float>(dt);
-                    part_params.frame_seed += 1013904223u;
-                    gpu_solver.advect_particles(renderer.particle_buffer(),
-                                                renderer.particle_count(),
-                                                part_params);
+        // --- physics & sequence render ---
+        if (seq_job.active) {
+            // Advance simulation step-by-step for the offline sequence render
+            if (seq_job.current_frame > seq_job.start_frame) {
+                if (use_gpu) {
+                    gpu_solver.step(dt, hbar);
+                } else {
+                    isf::schrodinger_step(g, dt, hbar);
+                    isf::normalize(g);
+                    isf::pressure_project(g, press_ws);
+                    isf::recover_velocity_from_workspace(g, hbar, press_ws, vf);
+                    gpu_solver.upload_velocity(vf);
                 }
+            }
+            sim_frame = seq_job.current_frame;
+
+            char fname[64];
+            std::snprintf(fname, sizeof(fname), "frame_%04d.bmp", seq_job.current_frame);
+
+            const float render_aspect = float(seq_job.render_w) / float(seq_job.render_h);
+            const glm::mat4 render_vp = cam.projection_matrix(render_aspect) * cam.view_matrix();
+            const glm::mat4 render_inv_vp = glm::inverse(render_vp);
+
+            vol_renderer.render_to_file(
+                gpu_solver.velocity_buffer(),
+                gpu_solver.psi1_buffer(),
+                gpu_solver.psi2_buffer(),
+                grid_n,
+                static_cast<float>(kDomainSize),
+                render_inv_vp,
+                cam.position(),
+                vol_params,
+                seq_job.render_w,
+                seq_job.render_h,
+                seq_job.out_dir,
+                fname
+            );
+
+            seq_job.current_frame++;
+            if (seq_job.current_frame > seq_job.end_frame) {
+                seq_job.active = false;
+                if (seq_job.render_grid_n != seq_job.orig_grid_n) {
+                    rebuild_at_resolution(seq_job.orig_grid_n);
+                }
+                last_render_path = std::format("{}/ ({} frames)", seq_job.out_dir, seq_job.end_frame - seq_job.start_frame + 1);
+            }
+        } else if (!pause_sim) {
+            if (pause_at_end && sim_frame >= seq_range[1]) {
+                pause_sim = true;
             } else {
-                isf::schrodinger_step(g, dt, hbar);
-                isf::normalize(g);
-                isf::pressure_project(g, press_ws);
-                isf::recover_velocity_from_workspace(g, hbar, press_ws, vf);
-                gpu_solver.upload_velocity(vf);
-                if (render_mode == RenderMode::TracerParticles) {
-                    viz::advect_particles_rk2(ps, g, vf, dt);
-                    renderer.upload(ps);
+                sim_frame++;
+                if (use_gpu) {
+                    gpu_solver.step(dt, hbar);
+                    if (render_mode == RenderMode::TracerParticles) {
+                        part_params.dt = static_cast<float>(dt);
+                        part_params.frame_seed += 1013904223u;
+                        gpu_solver.advect_particles(renderer.particle_buffer(),
+                                                    renderer.particle_count(),
+                                                    part_params);
+                    }
+                } else {
+                    isf::schrodinger_step(g, dt, hbar);
+                    isf::normalize(g);
+                    isf::pressure_project(g, press_ws);
+                    isf::recover_velocity_from_workspace(g, hbar, press_ws, vf);
+                    gpu_solver.upload_velocity(vf);
+                    if (render_mode == RenderMode::TracerParticles) {
+                        viz::advect_particles_rk2(ps, g, vf, dt);
+                        renderer.upload(ps);
+                    }
                 }
             }
         }
@@ -544,9 +629,9 @@ try {
             }
         }
 
-        static const int  res_options[] = { 32, 64, 128, 256 };
-        static const char* res_labels[]  = { "32^3", "64^3", "128^3", "256^3" };
-        int res_idx = 1; // default to 64
+        static const int  res_options[] = { 32, 64, 128, 256, 512 };
+        static const char* res_labels[]  = { "32^3", "64^3", "128^3", "256^3", "512^3 (High Detail)" };
+        int res_idx = 2; // default to 128
         for (int i = 0; i < IM_ARRAYSIZE(res_options); ++i) {
             if (res_options[i] == grid_n) { res_idx = i; break; }
         }
@@ -647,7 +732,26 @@ try {
                 seed_active_particles();
             }
         }
-        ImGui::Checkbox("pause", &pause_sim);
+
+        ImGui::Separator();
+        ImGui::SeparatorText("Timeline & Playback");
+        ImGui::Text("Frame: %d  (Target Range: %d to %d)", sim_frame, seq_range[0], seq_range[1]);
+        if (pause_sim) {
+            if (ImGui::Button("Play", ImVec2(65, 0))) pause_sim = false;
+        } else {
+            if (ImGui::Button("Pause", ImVec2(65, 0))) pause_sim = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Step +1", ImVec2(65, 0))) {
+            sim_frame++;
+            if (use_gpu) gpu_solver.step(dt, hbar);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Reset to 0", ImVec2(80, 0))) {
+            reset_scene();
+        }
+        ImGui::Checkbox("Pause at end frame", &pause_at_end);
+
         if (ImGui::Button("reset psi")) {
             switch (scene) {
             case Scene::VortexRing:    reset_vortex_ring(g);     break;
@@ -663,17 +767,98 @@ try {
         if (ImGui::Button("reset all")) {
             reset_scene();
         }
+
         ImGui::Separator();
-        ImGui::SeparatorText("Rendering & Export");
-        if (ImGui::Button("Render Frame to ./renders (Lit)", ImVec2(-1, 30))) {
+        ImGui::SeparatorText("Rendering & Sequence Export");
+        if (ImGui::Button("Render Current Frame -> ./renders", ImVec2(-1, 28))) {
             render_requested = true;
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Renders the 3D quantum smoke field with volumetric self-shadowing\n"
+            ImGui::SetTooltip("Renders the current 3D quantum smoke field with volumetric self-shadowing\n"
                               "and gradient normal illumination, saving to ./renders/render_XXXX.bmp.");
         }
+
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.4f, 0.85f, 1.0f, 1.0f), "Sequence Export (Frames 0 to 100):");
+        ImGui::DragIntRange2("frame range", &seq_range[0], &seq_range[1], 1, 0, 2000, "Start: %d", "End: %d");
+
+        static const int   seq_grid_opts[]   = { 128, 256, 512 };
+        static const char* seq_grid_labels[] = { "128^3", "256^3", "512^3 (High Detail Cinema)" };
+        ImGui::Combo("sequence grid res", &seq_grid_choice, seq_grid_labels, IM_ARRAYSIZE(seq_grid_labels));
+
+        static const char* seq_res_labels[] = {
+            "Native Window Size",
+            "1080p Full HD (1920x1080)",
+            "720p HD (1280x720)",
+            "4K UHD (3840x2160)"
+        };
+        ImGui::Combo("sequence image res", &seq_res_choice, seq_res_labels, IM_ARRAYSIZE(seq_res_labels));
+
+        char btn_label[128];
+        std::snprintf(btn_label, sizeof(btn_label), "Render Sequence (%d to %d at %s) -> ./renders",
+                      seq_range[0], seq_range[1], seq_grid_labels[seq_grid_choice]);
+
+        if (ImGui::Button(btn_label, ImVec2(-1, 32))) {
+            seq_job.orig_grid_n   = grid_n;
+            seq_job.render_grid_n = seq_grid_opts[seq_grid_choice];
+            seq_job.start_frame   = seq_range[0];
+            seq_job.end_frame     = seq_range[1];
+            seq_job.current_frame = seq_range[0];
+            seq_job.out_dir       = get_next_seq_dir();
+
+            int fbw_curr = 0, fbh_curr = 0;
+            win.framebuffer_size(fbw_curr, fbh_curr);
+            switch (seq_res_choice) {
+            case 0: // Native
+                seq_job.render_w = fbw_curr > 0 ? fbw_curr : 1280;
+                seq_job.render_h = fbh_curr > 0 ? fbh_curr : 720;
+                break;
+            case 1: // 1080p
+                seq_job.render_w = 1920;
+                seq_job.render_h = 1080;
+                break;
+            case 2: // 720p
+                seq_job.render_w = 1280;
+                seq_job.render_h = 720;
+                break;
+            case 3: // 4K
+                seq_job.render_w = 3840;
+                seq_job.render_h = 2160;
+                break;
+            }
+
+            if (seq_job.render_grid_n != grid_n) {
+                rebuild_at_resolution(seq_job.render_grid_n);
+            }
+            reset_scene();
+            seq_job.active = true;
+        }
+
         if (!last_render_path.empty()) {
             ImGui::TextColored(ImVec4(0.35f, 0.95f, 0.45f, 1.0f), "Saved: %s", last_render_path.c_str());
+        }
+
+        if (seq_job.active) {
+            ImGui::OpenPopup("Rendering Sequence...");
+        }
+        if (ImGui::BeginPopupModal("Rendering Sequence...", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            const int total_frames = seq_job.end_frame - seq_job.start_frame + 1;
+            const int done_frames  = seq_job.current_frame - seq_job.start_frame;
+            const float progress   = total_frames > 0 ? float(done_frames) / float(total_frames) : 0.0f;
+
+            ImGui::Text("Exporting sequence to: %s/", seq_job.out_dir.c_str());
+            ImGui::Text("Render size: %dx%d | Simulation grid: %d^3", seq_job.render_w, seq_job.render_h, grid_n);
+            ImGui::ProgressBar(progress, ImVec2(340, 26));
+            ImGui::Text("Frame: %d / %d (%.1f%% complete)", seq_job.current_frame, seq_job.end_frame, progress * 100.0f);
+
+            if (ImGui::Button("Cancel Sequence Render", ImVec2(340, 28))) {
+                seq_job.active = false;
+                if (seq_job.render_grid_n != seq_job.orig_grid_n) {
+                    rebuild_at_resolution(seq_job.orig_grid_n);
+                }
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
         }
 
         recorder.imgui_panel();
