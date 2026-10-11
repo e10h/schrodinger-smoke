@@ -71,7 +71,7 @@ inline wgpu::BindGroupEntry bg_buf_entry(uint32_t binding, wgpu::Buffer buf, siz
     return e;
 }
 
-inline wgpu::ComputePipeline create_pipe(wgpu::ShaderModule module, wgpu::BindGroupLayout bgl)
+inline wgpu::ComputePipeline create_pipe(wgpu::ShaderModule module, wgpu::BindGroupLayout bgl, const char* entryPoint = "main")
 {
     wgpu::PipelineLayoutDescriptor plDesc{};
     plDesc.bindGroupLayoutCount = 1;
@@ -81,7 +81,7 @@ inline wgpu::ComputePipeline create_pipe(wgpu::ShaderModule module, wgpu::BindGr
     wgpu::ComputePipelineDescriptor cpDesc{};
     cpDesc.layout = pl;
     cpDesc.compute.module = module;
-    cpDesc.compute.entryPoint = "main";
+    cpDesc.compute.entryPoint = entryPoint;
     wgpu::ComputePipeline pipe = wgfx::device.createComputePipeline(cpDesc);
     pl.release();
     return pipe;
@@ -120,7 +120,13 @@ void GpuFluidSolver::destroy_resources()
     safe_release(bg_poisson_);
     safe_release(bg_phase_vel_);
 
-    safe_release(pipe_fft_);
+    safe_release(pipe_fft_x_fwd_);
+    safe_release(pipe_fft_x_inv_);
+    safe_release(pipe_fft_y_fwd_);
+    safe_release(pipe_fft_y_inv_);
+    safe_release(pipe_fft_z_fwd_);
+    safe_release(pipe_fft_z_inv_);
+
     safe_release(pipe_propagate_);
     safe_release(pipe_normalize_);
     safe_release(pipe_divergence_);
@@ -141,7 +147,6 @@ void GpuFluidSolver::destroy_resources()
     safe_release(b_scratch_);
     safe_release(b_vel_);
     safe_release(u_sim_param_);
-    safe_release(u_fft_param_);
     safe_release(u_adv_param_);
 }
 
@@ -169,7 +174,6 @@ void GpuFluidSolver::init_buffers()
 
     const auto unif_usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
     u_sim_param_ = create_buffer(64, unif_usage);
-    u_fft_param_ = create_buffer(64, unif_usage);
     u_adv_param_ = create_buffer(64, unif_usage);
 }
 
@@ -185,18 +189,10 @@ void GpuFluidSolver::init_pipelines()
     const size_t vel_bytes   = total_cells * sizeof(float) * 4;
 
     // -------------------------------------------------------------
-    // 1. Stockham Radix-2 FFT Shader
+    // 1. Stockham Radix-2 FFT Shaders (Stateless, 6 Entry Points)
     // -------------------------------------------------------------
     std::string fft_wgsl = std::format(R"wgsl(
-struct FftParams {{
-    axis: u32,
-    is_inv: u32,
-    _pad0: u32,
-    _pad1: u32,
-}};
-
-@group(0) @binding(0) var<uniform> u_fft: FftParams;
-@group(0) @binding(1) var<storage, read_write> s_data: array<vec2<f32>>;
+@group(0) @binding(0) var<storage, read_write> s_data: array<vec2<f32>>;
 
 const N: u32 = {0}u;
 const HALF_N: u32 = {1}u;
@@ -210,36 +206,7 @@ fn complex_mul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {{
     return vec2<f32>(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
 }}
 
-@compute @workgroup_size({1}, 1, 1)
-fn main(@builtin(local_invocation_id) lid: vec3<u32>,
-        @builtin(workgroup_id) wid: vec3<u32>) {{
-    let t = lid.x;
-    let axis = u_fft.axis;
-    let is_inv = (u_fft.is_inv != 0u);
-
-    // Calculate linear global indices for thread t and t + HALF_N
-    var idx0: u32 = 0u;
-    var idx1: u32 = 0u;
-    if (axis == 0u) {{
-        // Along X: wid.x = y, wid.y = z
-        let y = wid.x;
-        let z = wid.y;
-        idx0 = t + N * (y + N * z);
-        idx1 = (t + HALF_N) + N * (y + N * z);
-    }} else if (axis == 1u) {{
-        // Along Y: wid.x = x, wid.y = z
-        let x = wid.x;
-        let z = wid.y;
-        idx0 = x + N * (t + N * z);
-        idx1 = x + N * ((t + HALF_N) + N * z);
-    }} else {{
-        // Along Z: wid.x = x, wid.y = y
-        let x = wid.x;
-        let y = wid.y;
-        idx0 = x + N * (y + N * t);
-        idx1 = x + N * (y + N * (t + HALF_N));
-    }}
-
+fn run_stockham(t: u32, idx0: u32, idx1: u32, is_inv: bool) {{
     s0[t]          = s_data[idx0];
     s0[t + HALF_N] = s_data[idx1];
     workgroupBarrier();
@@ -288,24 +255,76 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
     s_data[idx0] = res0;
     s_data[idx1] = res1;
 }}
+
+@compute @workgroup_size({1}, 1, 1)
+fn fft_x_fwd(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {{
+    let t = lid.x;
+    let y = wid.x;
+    let z = wid.y;
+    run_stockham(t, t + N * (y + N * z), (t + HALF_N) + N * (y + N * z), false);
+}}
+
+@compute @workgroup_size({1}, 1, 1)
+fn fft_x_inv(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {{
+    let t = lid.x;
+    let y = wid.x;
+    let z = wid.y;
+    run_stockham(t, t + N * (y + N * z), (t + HALF_N) + N * (y + N * z), true);
+}}
+
+@compute @workgroup_size({1}, 1, 1)
+fn fft_y_fwd(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {{
+    let t = lid.x;
+    let x = wid.x;
+    let z = wid.y;
+    run_stockham(t, x + N * (t + N * z), x + N * ((t + HALF_N) + N * z), false);
+}}
+
+@compute @workgroup_size({1}, 1, 1)
+fn fft_y_inv(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {{
+    let t = lid.x;
+    let x = wid.x;
+    let z = wid.y;
+    run_stockham(t, x + N * (t + N * z), x + N * ((t + HALF_N) + N * z), true);
+}}
+
+@compute @workgroup_size({1}, 1, 1)
+fn fft_z_fwd(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {{
+    let t = lid.x;
+    let x = wid.x;
+    let y = wid.y;
+    run_stockham(t, x + N * (y + N * t), x + N * (y + N * (t + HALF_N)), false);
+}}
+
+@compute @workgroup_size({1}, 1, 1)
+fn fft_z_inv(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {{
+    let t = lid.x;
+    let x = wid.x;
+    let y = wid.y;
+    run_stockham(t, x + N * (y + N * t), x + N * (y + N * (t + HALF_N)), true);
+}}
 )wgsl", N, half_n, log2_n);
 
     wgpu::ShaderModule mod_fft = create_module(fft_wgsl);
     std::vector<wgpu::BindGroupLayoutEntry> bgl_fft_entries = {
-        uniform_entry(0),
-        storage_entry(1, /*readOnly=*/false)
+        storage_entry(0, /*readOnly=*/false)
     };
     wgpu::BindGroupLayoutDescriptor bgl_fft_desc{};
     bgl_fft_desc.entryCount = bgl_fft_entries.size();
     bgl_fft_desc.entries = bgl_fft_entries.data();
     bgl_fft_ = wgfx::device.createBindGroupLayout(bgl_fft_desc);
-    pipe_fft_ = create_pipe(mod_fft, bgl_fft_);
+
+    pipe_fft_x_fwd_ = create_pipe(mod_fft, bgl_fft_, "fft_x_fwd");
+    pipe_fft_x_inv_ = create_pipe(mod_fft, bgl_fft_, "fft_x_inv");
+    pipe_fft_y_fwd_ = create_pipe(mod_fft, bgl_fft_, "fft_y_fwd");
+    pipe_fft_y_inv_ = create_pipe(mod_fft, bgl_fft_, "fft_y_inv");
+    pipe_fft_z_fwd_ = create_pipe(mod_fft, bgl_fft_, "fft_z_fwd");
+    pipe_fft_z_inv_ = create_pipe(mod_fft, bgl_fft_, "fft_z_inv");
     mod_fft.release();
 
     auto make_fft_bg = [&](wgpu::Buffer target_buf) {
         std::vector<wgpu::BindGroupEntry> entries = {
-            bg_buf_entry(0, u_fft_param_, 64),
-            bg_buf_entry(1, target_buf, cplx_bytes)
+            bg_buf_entry(0, target_buf, cplx_bytes)
         };
         wgpu::BindGroupDescriptor bgDesc{};
         bgDesc.layout = bgl_fft_;
@@ -337,6 +356,10 @@ fn cell_index(x: u32, y: u32, z: u32, nx: u32, ny: u32) -> u32 {
 fn wrap_c(c: i32, n: u32) -> u32 {
     let un = i32(n);
     return u32((c % un + un) % un);
+}
+fn wrap_pos(v: f32, period: f32) -> f32 {
+    let r = v - floor(v / period) * period;
+    return select(r, 0.0, r >= period);
 }
 )wgsl";
 
@@ -723,9 +746,9 @@ fn sample_vel_trilinear(pos: vec3<f32>) -> vec3<f32> {
     let lz = u_sim.lz;
 
     // Periodic wrap into [0, L)
-    let wx = (pos.x % lx + lx) % lx;
-    let wy = (pos.y % ly + ly) % ly;
-    let wz = (pos.z % lz + lz) % lz;
+    let wx = wrap_pos(pos.x, lx);
+    let wy = wrap_pos(pos.y, ly);
+    let wz = wrap_pos(pos.z, lz);
 
     let dx = lx / f32(u_sim.nx);
     let dy = ly / f32(u_sim.ny);
@@ -782,9 +805,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var pos1 = pos0 + u_adv.dt * v1;
 
     // Wrap into periodic box [0, L)
-    pos1.x = (pos1.x % u_sim.lx + u_sim.lx) % u_sim.lx;
-    pos1.y = (pos1.y % u_sim.ly + u_sim.ly) % u_sim.ly;
-    pos1.z = (pos1.z % u_sim.lz + u_sim.lz) % u_sim.lz;
+    pos1.x = wrap_pos(pos1.x, u_sim.lx);
+    pos1.y = wrap_pos(pos1.y, u_sim.ly);
+    pos1.z = wrap_pos(pos1.z, u_sim.lz);
 
     p.pos = vec4<f32>(pos1, 1.0);
     s_particles[p_idx] = p;
@@ -830,25 +853,24 @@ void GpuFluidSolver::upload_grid(const isf::Grid3D& g)
 void GpuFluidSolver::execute_fft_3d(wgpu::CommandEncoder& enc, wgpu::BindGroup bg, bool inverse)
 {
     const uint32_t N = static_cast<uint32_t>(grid_n_);
-    struct FftParams {
-        uint32_t axis;
-        uint32_t is_inv;
-        uint32_t pad0;
-        uint32_t pad1;
-    };
-
-    // Axis 0: X (passes over Y and Z)
-    for (uint32_t axis = 0; axis < 3; ++axis) {
-        FftParams params{ axis, inverse ? 1u : 0u, 0u, 0u };
-        wgfx::queue.writeBuffer(u_fft_param_, 0, &params, sizeof(params));
-
+    auto dispatch_pass = [&](wgpu::ComputePipeline pipe) {
         wgpu::ComputePassDescriptor cpDesc{};
         wgpu::ComputePassEncoder cpass = enc.beginComputePass(cpDesc);
-        cpass.setPipeline(pipe_fft_);
+        cpass.setPipeline(pipe);
         cpass.setBindGroup(0, bg, 0, nullptr);
         cpass.dispatchWorkgroups(N, N, 1);
         cpass.end();
         cpass.release();
+    };
+
+    if (!inverse) {
+        dispatch_pass(pipe_fft_x_fwd_);
+        dispatch_pass(pipe_fft_y_fwd_);
+        dispatch_pass(pipe_fft_z_fwd_);
+    } else {
+        dispatch_pass(pipe_fft_x_inv_);
+        dispatch_pass(pipe_fft_y_inv_);
+        dispatch_pass(pipe_fft_z_inv_);
     }
 }
 

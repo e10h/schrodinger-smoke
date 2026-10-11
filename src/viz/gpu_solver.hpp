@@ -88,11 +88,15 @@ private:
     wgpu::Buffer b_scratch_;   // vec2<f32> * N^3
     wgpu::Buffer b_vel_;       // vec4<f32> * N^3
     wgpu::Buffer u_sim_param_; // Uniform buffer for simulation params
-    wgpu::Buffer u_fft_param_; // Uniform buffer for FFT axis/direction params
     wgpu::Buffer u_adv_param_; // Uniform buffer for particle advection params
 
     // Compute Pipelines
-    wgpu::ComputePipeline pipe_fft_;
+    wgpu::ComputePipeline pipe_fft_x_fwd_;
+    wgpu::ComputePipeline pipe_fft_x_inv_;
+    wgpu::ComputePipeline pipe_fft_y_fwd_;
+    wgpu::ComputePipeline pipe_fft_y_inv_;
+    wgpu::ComputePipeline pipe_fft_z_fwd_;
+    wgpu::ComputePipeline pipe_fft_z_inv_;
     wgpu::ComputePipeline pipe_propagate_;
     wgpu::ComputePipeline pipe_normalize_;
     wgpu::ComputePipeline pipe_divergence_;
