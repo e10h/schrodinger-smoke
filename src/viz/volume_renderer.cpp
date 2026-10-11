@@ -106,15 +106,15 @@ fn sample_vorticity(p: vec3<f32>, n: u32, l: vec3<f32>) -> f32 {
 
 fn sample_field(p: vec3<f32>, mode: i32, n: u32, l: vec3<f32>) -> f32 {
     if (mode == 0) {
-        // Vorticity magnitude
-        return sample_vorticity(p, n, l);
+        // Vorticity magnitude (normalized to ~[0, 10] range)
+        return sample_vorticity(p, n, l) * 0.1;
     } else if (mode == 1) {
-        // Velocity speed
+        // Velocity speed (magnitude in m/s, ~[0, 3] range)
         return length(sample_vel(p, n, l));
     } else {
         // Enstrophy (|curl|^2)
-        let vort = sample_vorticity(p, n, l);
-        return vort * vort * 0.1;
+        let vort = sample_vorticity(p, n, l) * 0.1;
+        return vort * vort * 0.5;
     }
 }
 
@@ -146,20 +146,20 @@ fn get_color(t_norm: f32, palette: i32) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Unproject near/far points
-    let near_h = u_vol.inv_view_proj * vec4<f32>(in.uv.x, in.uv.y, 0.0, 1.0);
+    // Unproject to world-space far plane
     let far_h  = u_vol.inv_view_proj * vec4<f32>(in.uv.x, in.uv.y, 1.0, 1.0);
-    let near_pt = near_h.xyz / near_h.w;
-    let far_pt  = far_h.xyz / far_h.w;
+    let far_pt = far_h.xyz / far_h.w;
 
     let ro = u_vol.cam_pos.xyz;
-    let rd = normalize(far_pt - near_pt);
+    let rd = normalize(far_pt - ro);
 
     let box_min = vec3<f32>(0.0);
     let box_max = u_vol.domain_params.xyz;
 
     // Ray-box intersection (slab method)
-    let inv_rd = 1.0 / rd;
+    // Avoid division by exact zero which yields NaNs
+    let safe_rd = select(rd, vec3<f32>(1e-6), abs(rd) < vec3<f32>(1e-6));
+    let inv_rd = 1.0 / safe_rd;
     let t0 = (box_min - ro) * inv_rd;
     let t1 = (box_max - ro) * inv_rd;
     let tmin = min(t0, t1);
@@ -195,7 +195,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         if (val > threshold) {
             let density = (val - threshold) * density_s;
             let sample_alpha = 1.0 - exp(-density * dt);
-            let norm_val = clamp((val - threshold) / max(val, 0.1), 0.0, 1.0);
+            let norm_val = clamp((val - threshold) / max(threshold * 8.0, 0.02), 0.0, 1.0);
             let col = get_color(norm_val, palette_idx);
 
             // Front-to-back compositing
@@ -228,10 +228,9 @@ VolumeRenderer::VolumeRenderer()
     u_params_ = pipeline_->addUniform(0, sizeof(UniformData));
 
     // Storage buffer binding 1: will be bound to velocity field buffer
-    // Initialize with a placeholder storage buffer of 64^3 vec4<f32>
-    bound_grid_n_ = 64;
-    size_t init_bytes = static_cast<size_t>(bound_grid_n_) * bound_grid_n_ * bound_grid_n_ * sizeof(float) * 4;
-    s_velocity_ = pipeline_->addStorage(1, init_bytes, nullptr, /*readOnly=*/true);
+    // Initialize layout with minBindingSize = 0 to allow binding any resolution (32^3 to 256^3)
+    s_velocity_ = pipeline_->addStorage(1, 16, nullptr, /*readOnly=*/true);
+    pipeline_->uniforms.layouts.back().buffer.minBindingSize = 0;
 
     // Premultiplied alpha blending for luminous volumetric smoke
     pipeline_->customBlend = true;
@@ -259,21 +258,28 @@ void VolumeRenderer::render(wgfx::RenderPass* pass,
 {
     if (!pass || !vel_buffer || grid_n <= 0) return;
 
-    // Update storage buffer binding if buffer changed
+    // Recreate bind group whenever buffer or resolution changes
     if (bound_buffer_ != vel_buffer || bound_grid_n_ != grid_n) {
         bound_buffer_ = vel_buffer;
         bound_grid_n_ = grid_n;
-        size_t size = static_cast<size_t>(grid_n) * grid_n * grid_n * sizeof(float) * 4;
-        s_velocity_->buffer = vel_buffer;
-        s_velocity_->minBindingSize = static_cast<int>(size);
-        s_velocity_->entry.buffer = vel_buffer;
-        s_velocity_->entry.size = size;
+        const size_t size = static_cast<size_t>(grid_n) * grid_n * grid_n * sizeof(float) * 4;
 
-        // Recreate bind group with updated buffer handle
+        std::vector<wgpu::BindGroupEntry> bg_entries(2);
+        bg_entries[0].binding = 0;
+        bg_entries[0].buffer  = u_params_->buffer;
+        bg_entries[0].offset  = 0;
+        bg_entries[0].size    = sizeof(UniformData);
+
+        bg_entries[1].binding = 1;
+        bg_entries[1].buffer  = vel_buffer;
+        bg_entries[1].offset  = 0;
+        bg_entries[1].size    = size;
+
         wgpu::BindGroupDescriptor bgDesc{};
-        bgDesc.layout = pipeline_->uniforms.bindGroupLayout;
-        bgDesc.entryCount = pipeline_->uniforms.entries.size();
-        bgDesc.entries = pipeline_->uniforms.entries.data();
+        bgDesc.layout     = pipeline_->uniforms.bindGroupLayout;
+        bgDesc.entryCount = bg_entries.size();
+        bgDesc.entries    = bg_entries.data();
+
         if (pipeline_->uniforms.bindGroup) {
             pipeline_->uniforms.bindGroup.release();
         }

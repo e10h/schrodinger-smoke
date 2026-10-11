@@ -32,8 +32,8 @@ enum class VolumePalette : int {
 struct VolumeRenderParams {
     VolumeFieldMode field_mode    = VolumeFieldMode::VorticityMagnitude;
     VolumePalette   palette       = VolumePalette::NeonCyan;
-    float           density_scale = 12.0f;
-    float           threshold     = 0.04f;
+    float           density_scale = 10.0f;
+    float           threshold     = 0.05f;
     float           step_count    = 160.0f;
 };
 
