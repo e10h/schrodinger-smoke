@@ -29,12 +29,18 @@
 #include <glm/matrix.hpp>
 #include <glm/vec3.hpp>
 
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <memory>
 #include <numbers>
 #include <random>
 #include <stdexcept>
+#include <string>
+#include <thread>
 
 namespace {
 
@@ -306,18 +312,20 @@ try {
     bool   pause_sim  = false;
     int    sim_frame  = 0;
 
-    struct SequenceRenderJob {
+    struct AsyncSequenceProcess {
         bool active = false;
-        int  current_frame = 0;
+        std::atomic<bool> thread_running{false};
+        std::unique_ptr<std::thread> worker;
         int  start_frame = 0;
-        int  end_frame = 100;
+        int  end_frame   = 100;
         int  render_grid_n = 512;
-        int  render_w = 1920;
-        int  render_h = 1080;
-        int  orig_grid_n = 128;
+        int  render_w    = 1920;
+        int  render_h    = 1080;
         std::string out_dir;
+        std::string status_msg;
+        int  frames_rendered = 0;
     };
-    SequenceRenderJob seq_job;
+    AsyncSequenceProcess seq_proc;
     int  seq_range[2]    = { 0, 100 };
     int  seq_grid_choice = 2; // 0: 128, 1: 256, 2: 512 (default to 512)
     int  seq_res_choice  = 1; // 0: Native, 1: 1080p, 2: 720p, 3: 4K (default to 1080p)
@@ -423,53 +431,8 @@ try {
             cam.zoom(std::exp(-0.1f * inp.scroll_dy));
         }
 
-        // --- physics & sequence render ---
-        if (seq_job.active) {
-            // Advance simulation step-by-step for the offline sequence render
-            if (seq_job.current_frame > seq_job.start_frame) {
-                if (use_gpu) {
-                    gpu_solver.step(dt, hbar);
-                } else {
-                    isf::schrodinger_step(g, dt, hbar);
-                    isf::normalize(g);
-                    isf::pressure_project(g, press_ws);
-                    isf::recover_velocity_from_workspace(g, hbar, press_ws, vf);
-                    gpu_solver.upload_velocity(vf);
-                }
-            }
-            sim_frame = seq_job.current_frame;
-
-            char fname[64];
-            std::snprintf(fname, sizeof(fname), "frame_%04d.bmp", seq_job.current_frame);
-
-            const float render_aspect = float(seq_job.render_w) / float(seq_job.render_h);
-            const glm::mat4 render_vp = cam.projection_matrix(render_aspect) * cam.view_matrix();
-            const glm::mat4 render_inv_vp = glm::inverse(render_vp);
-
-            vol_renderer.render_to_file(
-                gpu_solver.velocity_buffer(),
-                gpu_solver.psi1_buffer(),
-                gpu_solver.psi2_buffer(),
-                grid_n,
-                static_cast<float>(kDomainSize),
-                render_inv_vp,
-                cam.position(),
-                vol_params,
-                seq_job.render_w,
-                seq_job.render_h,
-                seq_job.out_dir,
-                fname
-            );
-
-            seq_job.current_frame++;
-            if (seq_job.current_frame > seq_job.end_frame) {
-                seq_job.active = false;
-                if (seq_job.render_grid_n != seq_job.orig_grid_n) {
-                    rebuild_at_resolution(seq_job.orig_grid_n);
-                }
-                last_render_path = std::format("{}/ ({} frames)", seq_job.out_dir, seq_job.end_frame - seq_job.start_frame + 1);
-            }
-        } else if (!pause_sim) {
+        // --- physics ---
+        if (!pause_sim) {
             if (pause_at_end && sim_frame >= seq_range[1]) {
                 pause_sim = true;
             } else {
@@ -798,67 +761,108 @@ try {
         std::snprintf(btn_label, sizeof(btn_label), "Render Sequence (%d to %d at %s) -> ./renders",
                       seq_range[0], seq_range[1], seq_grid_labels[seq_grid_choice]);
 
-        if (ImGui::Button(btn_label, ImVec2(-1, 32))) {
-            seq_job.orig_grid_n   = grid_n;
-            seq_job.render_grid_n = seq_grid_opts[seq_grid_choice];
-            seq_job.start_frame   = seq_range[0];
-            seq_job.end_frame     = seq_range[1];
-            seq_job.current_frame = seq_range[0];
-            seq_job.out_dir       = get_next_seq_dir();
+        if (seq_proc.active) {
+            // Check if background worker has finished
+            if (!seq_proc.thread_running.load()) {
+                if (seq_proc.worker && seq_proc.worker->joinable()) {
+                    seq_proc.worker->join();
+                    seq_proc.worker.reset();
+                }
+                seq_proc.active = false;
+                last_render_path = seq_proc.status_msg;
+            } else {
+                // Count how many frames have been written so far to display live progress!
+                std::error_code ec;
+                int count = 0;
+                for (const auto& entry : std::filesystem::directory_iterator(seq_proc.out_dir, ec)) {
+                    if (entry.path().extension() == ".bmp") count++;
+                }
+                seq_proc.frames_rendered = count;
+            }
+        }
+
+        if (seq_proc.active) {
+            ImGui::BeginDisabled();
+        }
+
+        if (ImGui::Button(btn_label, ImVec2(-1, 32)) && !seq_proc.active) {
+            seq_proc.start_frame   = seq_range[0];
+            seq_proc.end_frame     = seq_range[1];
+            seq_proc.render_grid_n = seq_grid_opts[seq_grid_choice];
+            seq_proc.out_dir       = get_next_seq_dir();
+            seq_proc.frames_rendered = 0;
 
             int fbw_curr = 0, fbh_curr = 0;
             win.framebuffer_size(fbw_curr, fbh_curr);
             switch (seq_res_choice) {
             case 0: // Native
-                seq_job.render_w = fbw_curr > 0 ? fbw_curr : 1280;
-                seq_job.render_h = fbh_curr > 0 ? fbh_curr : 720;
+                seq_proc.render_w = fbw_curr > 0 ? fbw_curr : 1280;
+                seq_proc.render_h = fbh_curr > 0 ? fbh_curr : 720;
                 break;
             case 1: // 1080p
-                seq_job.render_w = 1920;
-                seq_job.render_h = 1080;
+                seq_proc.render_w = 1920;
+                seq_proc.render_h = 1080;
                 break;
             case 2: // 720p
-                seq_job.render_w = 1280;
-                seq_job.render_h = 720;
+                seq_proc.render_w = 1280;
+                seq_proc.render_h = 720;
                 break;
             case 3: // 4K
-                seq_job.render_w = 3840;
-                seq_job.render_h = 2160;
+                seq_proc.render_w = 3840;
+                seq_proc.render_h = 2160;
                 break;
             }
 
-            if (seq_job.render_grid_n != grid_n) {
-                rebuild_at_resolution(seq_job.render_grid_n);
-            }
-            reset_scene();
-            seq_job.active = true;
+            // Capture exact current camera orientation and scene parameters
+            const float yaw   = cam.yaw();
+            const float pitch = cam.pitch();
+            const float dist_mult = cam.distance() / float(kDomainSize);
+            const std::string scene_name = (scene == Scene::VortexRing) ? "ring" : "balls";
+
+            // Spawn background worker to run the standalone OpenMP renderer!
+            seq_proc.active = true;
+            seq_proc.thread_running.store(true);
+
+            seq_proc.worker = std::make_unique<std::thread>([&seq_proc, scene_name, dt, hbar, yaw, pitch, dist_mult]() {
+                char cmd[1024];
+                std::snprintf(cmd, sizeof(cmd),
+                    "./build/schroedinger_render --start %d --end %d --grid %d --width %d --height %d "
+                    "--dt %.4f --hbar %.4f --scene %s --yaw %.3f --pitch %.3f --dist %.3f --out %s",
+                    seq_proc.start_frame, seq_proc.end_frame, seq_proc.render_grid_n,
+                    seq_proc.render_w, seq_proc.render_h,
+                    dt, hbar, scene_name.c_str(),
+                    yaw, pitch, dist_mult, seq_proc.out_dir.c_str());
+
+                int ret = std::system(cmd);
+                if (ret == 0) {
+                    seq_proc.status_msg = std::format("{}/ ({} frames)", seq_proc.out_dir,
+                                                      seq_proc.end_frame - seq_proc.start_frame + 1);
+                } else {
+                    seq_proc.status_msg = std::format("Render failed (exit code {})", ret);
+                }
+                seq_proc.thread_running.store(false);
+            });
+        }
+
+        if (seq_proc.active) {
+            ImGui::EndDisabled();
+        }
+
+        // Live non-blocking status & progress bar in main panel
+        if (seq_proc.active) {
+            const int total_frames = seq_proc.end_frame - seq_proc.start_frame + 1;
+            const float progress   = total_frames > 0 ? float(seq_proc.frames_rendered) / float(total_frames) : 0.0f;
+
+            ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.2f, 0.9f, 1.0f, 1.0f),
+                               "Background Render Active (OpenMP + WebGPU standalone):");
+            ImGui::ProgressBar(progress, ImVec2(-1, 24));
+            ImGui::Text("Saved %d / %d BMP frames -> %s/",
+                        seq_proc.frames_rendered, total_frames, seq_proc.out_dir.c_str());
         }
 
         if (!last_render_path.empty()) {
             ImGui::TextColored(ImVec4(0.35f, 0.95f, 0.45f, 1.0f), "Saved: %s", last_render_path.c_str());
-        }
-
-        if (seq_job.active) {
-            ImGui::OpenPopup("Rendering Sequence...");
-        }
-        if (ImGui::BeginPopupModal("Rendering Sequence...", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-            const int total_frames = seq_job.end_frame - seq_job.start_frame + 1;
-            const int done_frames  = seq_job.current_frame - seq_job.start_frame;
-            const float progress   = total_frames > 0 ? float(done_frames) / float(total_frames) : 0.0f;
-
-            ImGui::Text("Exporting sequence to: %s/", seq_job.out_dir.c_str());
-            ImGui::Text("Render size: %dx%d | Simulation grid: %d^3", seq_job.render_w, seq_job.render_h, grid_n);
-            ImGui::ProgressBar(progress, ImVec2(340, 26));
-            ImGui::Text("Frame: %d / %d (%.1f%% complete)", seq_job.current_frame, seq_job.end_frame, progress * 100.0f);
-
-            if (ImGui::Button("Cancel Sequence Render", ImVec2(340, 28))) {
-                seq_job.active = false;
-                if (seq_job.render_grid_n != seq_job.orig_grid_n) {
-                    rebuild_at_resolution(seq_job.orig_grid_n);
-                }
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::EndPopup();
         }
 
         recorder.imgui_panel();

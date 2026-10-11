@@ -182,6 +182,32 @@ set_target_properties(schroedinger_viewer PROPERTIES
 target_copy_webgpu_binaries(schroedinger_viewer)
 
 # ------------------------------------------------------------------
+# Standalone sequence renderer (OpenMP + WebGPU)
+# ------------------------------------------------------------------
+
+add_executable(schroedinger_render
+    src/render_seq.cpp
+    src/viz/volume_renderer.cpp
+    src/viz/gpu_solver.cpp
+)
+target_include_directories(schroedinger_render PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party
+    ${CMAKE_SOURCE_DIR}/third_party/wgfx/src
+    ${CMAKE_SOURCE_DIR}/third_party/wgfx/deps/sdl2webgpu
+)
+target_link_libraries(schroedinger_render PRIVATE
+    viz isf wgfx sdl2webgpu SDL3::SDL3 glm::glm webgpu
+)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(schroedinger_render PRIVATE OpenMP::OpenMP_CXX)
+endif()
+set_target_properties(schroedinger_render PROPERTIES
+    CXX_STANDARD 20
+)
+target_copy_webgpu_binaries(schroedinger_render)
+
+# ------------------------------------------------------------------
 # CPU benchmark
 # ------------------------------------------------------------------
 

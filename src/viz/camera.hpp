@@ -47,6 +47,10 @@ public:
     /// @brief Current distance from eye to target.
     [[nodiscard]] float distance() const noexcept { return distance_; }
 
+    /// @brief Current orbit angles.
+    [[nodiscard]] float yaw()   const noexcept { return yaw_; }
+    [[nodiscard]] float pitch() const noexcept { return pitch_; }
+
     /// @brief World-space eye position derived from (target, distance, yaw, pitch).
     [[nodiscard]] glm::vec3 position() const noexcept;
 
