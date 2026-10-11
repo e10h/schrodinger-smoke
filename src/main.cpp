@@ -835,8 +835,14 @@ try {
 
                 int ret = std::system(cmd);
                 if (ret == 0) {
-                    seq_proc.status_msg = std::format("{}/ ({} frames)", seq_proc.out_dir,
-                                                      seq_proc.end_frame - seq_proc.start_frame + 1);
+                    auto mp4_p = std::filesystem::path(seq_proc.out_dir) / "output.mp4";
+                    if (std::filesystem::exists(mp4_p)) {
+                        seq_proc.status_msg = std::format("{}/output.mp4 ({} frames)", seq_proc.out_dir,
+                                                          seq_proc.end_frame - seq_proc.start_frame + 1);
+                    } else {
+                        seq_proc.status_msg = std::format("{}/ ({} BMP frames)", seq_proc.out_dir,
+                                                          seq_proc.end_frame - seq_proc.start_frame + 1);
+                    }
                 } else {
                     seq_proc.status_msg = std::format("Render failed (exit code {})", ret);
                 }

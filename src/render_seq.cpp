@@ -88,7 +88,9 @@ try {
                         "  --out DIR        Output directory (default: renders/seq_0001)\n"
                         "  --yaw Y          Camera orbit yaw in radians (default: 0.45)\n"
                         "  --pitch P        Camera orbit pitch in radians (default: 0.22)\n"
-                        "  --dist D         Camera distance multiplier (default: 1.55)\n");
+                        "  --dist D         Camera distance multiplier (default: 1.55)\n"
+                        "  --fps N          Frame rate for MP4 output (default: 30)\n"
+                        "  --no-mp4         Skip MP4 generation\n");
             return 0;
         }
     }
@@ -98,6 +100,7 @@ try {
     const int   grid_n      = parse_int(argc, argv, "--grid", 512);
     const int   img_w       = parse_int(argc, argv, "--width", 1920);
     const int   img_h       = parse_int(argc, argv, "--height", 1080);
+    const int   fps         = parse_int(argc, argv, "--fps", 30);
     const float dt          = parse_float(argc, argv, "--dt", 0.020f);
     const float hbar        = parse_float(argc, argv, "--hbar", 0.020f);
     const float domain_size = parse_float(argc, argv, "--domain", 1.0f);
@@ -107,6 +110,13 @@ try {
     const float cam_yaw   = parse_float(argc, argv, "--yaw", 0.45f);
     const float cam_pitch = parse_float(argc, argv, "--pitch", 0.22f);
     const float cam_dist  = parse_float(argc, argv, "--dist", 1.55f);
+
+    bool make_mp4 = true;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--no-mp4") == 0) {
+            make_mp4 = false;
+        }
+    }
 
     std::error_code ec;
     std::filesystem::create_directories(out_dir, ec);
@@ -223,6 +233,42 @@ try {
                 end_frame - start_frame + 1, total_sec,
                 total_sec / std::max(1, end_frame - start_frame + 1));
     std::printf("[Renderer] Sequence location: %s\n", out_dir.c_str());
+
+    // Encode MP4 video using ffmpeg
+    if (make_mp4) {
+        std::filesystem::path mp4_path = std::filesystem::path(out_dir) / "output.mp4";
+        std::printf("\n[Renderer] Compiling frames into MP4 video (H.264 @ %d fps)...\n", fps);
+
+        // Find ffmpeg binary
+        std::string ffmpeg_bin = "ffmpeg";
+        if (std::system("which ffmpeg > /dev/null 2>&1") != 0) {
+            if (std::filesystem::exists("/opt/homebrew/bin/ffmpeg")) {
+                ffmpeg_bin = "/opt/homebrew/bin/ffmpeg";
+            } else if (std::filesystem::exists("/usr/local/bin/ffmpeg")) {
+                ffmpeg_bin = "/usr/local/bin/ffmpeg";
+            }
+        }
+
+        char cmd[1024];
+        std::snprintf(cmd, sizeof(cmd),
+            "%s -y -framerate %d -start_number %d -i \"%s/frame_%%04d.bmp\" "
+            "-c:v libx264 -pix_fmt yuv420p -crf 18 \"%s\" > /dev/null 2>&1",
+            ffmpeg_bin.c_str(),
+            fps,
+            start_frame,
+            out_dir.c_str(),
+            mp4_path.string().c_str());
+
+        int ret = std::system(cmd);
+        if (ret == 0 && std::filesystem::exists(mp4_path)) {
+            std::error_code size_ec;
+            double mb = double(std::filesystem::file_size(mp4_path, size_ec)) / (1024.0 * 1024.0);
+            std::printf("[Renderer] MP4 video created successfully: %s (%.2f MB)\n",
+                        mp4_path.string().c_str(), mb);
+        } else {
+            std::printf("[Renderer] Notice: ffmpeg encoding returned code %d (check if ffmpeg is in PATH).\n", ret);
+        }
+    }
 
     return 0;
 }
