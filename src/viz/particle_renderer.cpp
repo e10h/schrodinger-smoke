@@ -1,159 +1,172 @@
 /**
  * @file particle_renderer.cpp
- * @brief Implementation of the point-sprite particle renderer.
- *
- * Shader pipeline:
- *
- *   Vertex — transforms a_position by u_view_proj and sets a
- *   perspective-attenuated gl_PointSize (`u_point_size / clip.w`).
- *   Forwards a_color through to the fragment stage as v_color.
- *
- *   Fragment — discards outside the unit disk of gl_PointCoord and
- *   emits a soft radial falloff coloured by v_color, with additive
- *   alpha. Combined with additive blending this produces a pleasing
- *   volumetric-smoke look on a dark background.
- *
- * Per-particle colour is uploaded as a separate `vbo_col_` so the
- * advection code (which has no notion of colour) and the renderer's
- * colour buffer remain decoupled.
+ * @brief WebGPU implementation of tracer-particle billboard renderer.
  */
 
 #include "viz/particle_renderer.hpp"
-
 #include "viz/particles.hpp"
-#include "viz/shader.hpp"
 
-#include <glm/gtc/type_ptr.hpp>
+#include <cstring>
+#include <iostream>
 
 namespace viz {
 
 namespace {
 
-constexpr const char* kVertexShader = R"glsl(
-#version 410 core
-layout(location = 0) in vec3 a_position;
-layout(location = 1) in vec3 a_color;
+constexpr const char* kParticleShaderWGSL = R"wgsl(
+struct CameraUniforms {
+    view_proj: mat4x4<f32>,
+    cam_pos: vec4<f32>,
+    point_size: f32,
+    screen_width: f32,
+    screen_height: f32,
+    _pad0: f32,
+};
 
-uniform mat4  u_view_proj;
-uniform float u_point_size;
+struct ParticleData {
+    pos: vec4<f32>,
+    col: vec4<f32>,
+};
 
-out vec3 v_color;
+@group(0) @binding(0) var<uniform> u_cam: CameraUniforms;
+@group(0) @binding(1) var<storage, read> s_particles: array<ParticleData>;
 
-void main() {
-    vec4 clip = u_view_proj * vec4(a_position, 1.0);
-    gl_Position  = clip;
-    // Attenuate with perspective depth so near particles look larger.
-    gl_PointSize = u_point_size / max(clip.w, 0.1);
-    v_color      = a_color;
+struct VertexInput {
+    @builtin(vertex_index) vertex_index: u32,
+    @builtin(instance_index) instance_index: u32,
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec3<f32>,
+};
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var corners = array<vec2<f32>, 6>(
+        vec2<f32>(-0.5, -0.5),
+        vec2<f32>( 0.5, -0.5),
+        vec2<f32>( 0.5,  0.5),
+        vec2<f32>( 0.5,  0.5),
+        vec2<f32>(-0.5,  0.5),
+        vec2<f32>(-0.5, -0.5)
+    );
+
+    let corner = corners[in.vertex_index];
+    let p = s_particles[in.instance_index];
+
+    let center_clip = u_cam.view_proj * vec4<f32>(p.pos.xyz, 1.0);
+
+    // Exact OpenGL gl_PointSize perspective depth attenuation:
+    // gl_PointSize = u_point_size / max(clip.w, 0.1);
+    // In clip-space [-1, 1], pixel size is (gl_PointSize / screen_dim) * 2.0 * clip.w
+    let pt_pixels = u_cam.point_size / max(center_clip.w, 0.1);
+    let offset_x = corner.x * (pt_pixels / u_cam.screen_width) * 2.0 * center_clip.w;
+    let offset_y = corner.y * (pt_pixels / u_cam.screen_height) * 2.0 * center_clip.w;
+
+    var out: VertexOutput;
+    out.position = center_clip + vec4<f32>(offset_x, offset_y, 0.0, 0.0);
+    out.uv = corner + vec2<f32>(0.5, 0.5);
+    out.color = p.col.rgb;
+    return out;
 }
-)glsl";
 
-constexpr const char* kFragmentShader = R"glsl(
-#version 410 core
-in  vec3 v_color;
-out vec4 out_color;
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let d = in.uv - vec2<f32>(0.5, 0.5);
+    let r = length(d);
+    if (r > 0.5) {
+        discard;
+    }
 
-void main() {
-    vec2 d = gl_PointCoord - vec2(0.5);
-    float r = length(d);
-    if (r > 0.5) discard;
-    // Gaussian-ish radial falloff.
-    float a = smoothstep(0.5, 0.0, r);
-    out_color = vec4(v_color, a * 0.22);
+    // Exact OpenGL fragment equation:
+    // float a = smoothstep(0.5, 0.0, r);
+    // out_color = vec4(v_color, a * 0.22);
+    // Combined with glBlendFunc(GL_SRC_ALPHA, GL_ONE)
+    let a = smoothstep(0.5, 0.0, r) * 0.22;
+    return vec4<f32>(in.color, a);
 }
-)glsl";
+)wgsl";
 
 } // namespace
 
 ParticleRenderer::ParticleRenderer()
 {
-    program_   = compile_shader_program(kVertexShader, kFragmentShader);
-    loc_mvp_   = glGetUniformLocation(program_, "u_view_proj");
-    loc_psize_ = glGetUniformLocation(program_, "u_point_size");
+    pipeline_ = wgfx::loadPipeline(kParticleShaderWGSL);
+    pipeline_->useDepth  = false;
+    pipeline_->vertices  = 6; // 6 vertices per quad instance
+    pipeline_->instances = 1;
 
-    glGenVertexArrays(1, &vao_);
-    glGenBuffers(1, &vbo_pos_);
-    glGenBuffers(1, &vbo_col_);
+    // Uniform binding 0: Camera uniforms
+    u_camera_ = pipeline_->addUniform(0, sizeof(CameraUniforms));
 
-    glBindVertexArray(vao_);
+    // Storage buffer binding 1: particle array
+    // Pre-allocate for up to 600,000 particles (slider max)
+    buffer_capacity_ = 600000;
+    scratch_particles_.resize(buffer_capacity_);
+    s_particles_ = pipeline_->addStorage(1, buffer_capacity_ * sizeof(GpuParticle),
+                                         scratch_particles_.data(), /*readOnly=*/true);
 
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_pos_);
-    glVertexAttribPointer(/*index=*/0, /*size=*/3, GL_FLOAT, GL_FALSE,
-                          /*stride=*/3 * sizeof(float), nullptr);
-    glEnableVertexAttribArray(0);
+    pipeline_->init(nullptr);
 
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_col_);
-    glVertexAttribPointer(/*index=*/1, /*size=*/3, GL_FLOAT, GL_FALSE,
-                          /*stride=*/3 * sizeof(float), nullptr);
-    glEnableVertexAttribArray(1);
-
-    glBindVertexArray(0);
+    // Exact match to OpenGL: glBlendFunc(GL_SRC_ALPHA, GL_ONE)
+    // Recreate pipeline with custom blend factors to support unmodified stock wgfx
+    pipeline_->fragmentBlend.color.srcFactor = wgpu::BlendFactor::SrcAlpha;
+    pipeline_->fragmentBlend.color.dstFactor = wgpu::BlendFactor::One;
+    pipeline_->fragmentBlend.color.operation = wgpu::BlendOperation::Add;
+    pipeline_->fragmentBlend.alpha.srcFactor = wgpu::BlendFactor::Zero;
+    pipeline_->fragmentBlend.alpha.dstFactor = wgpu::BlendFactor::One;
+    pipeline_->fragmentBlend.alpha.operation = wgpu::BlendOperation::Add;
+    pipeline_->pipeline = wgfx::device.createRenderPipeline(pipeline_->pipelineDesc);
 }
 
 ParticleRenderer::~ParticleRenderer()
 {
-    if (vbo_col_) glDeleteBuffers(1, &vbo_col_);
-    if (vbo_pos_) glDeleteBuffers(1, &vbo_pos_);
-    if (vao_)     glDeleteVertexArrays(1, &vao_);
-    if (program_) glDeleteProgram(program_);
 }
 
 void ParticleRenderer::upload(const ParticleSystem& ps)
 {
-    const std::size_t n = ps.size();
+    particle_count_ = ps.size();
+    if (particle_count_ == 0) return;
 
-    // Pack positions: SoA → interleaved float3.
-    scratch_pos_.resize(3 * n);
-    for (std::size_t i = 0; i < n; ++i) {
-        scratch_pos_[3 * i + 0] = static_cast<float>(ps.x[i]);
-        scratch_pos_[3 * i + 1] = static_cast<float>(ps.y[i]);
-        scratch_pos_[3 * i + 2] = static_cast<float>(ps.z[i]);
+    if (particle_count_ > buffer_capacity_) {
+        buffer_capacity_ = particle_count_;
+        scratch_particles_.resize(buffer_capacity_);
     }
 
-    // Pack colours: SoA → interleaved float3, defaulting to soft white
-    // when the particle system has no per-particle colour.
-    scratch_col_.resize(3 * n);
-    if (ps.has_colors()) {
-        for (std::size_t i = 0; i < n; ++i) {
-            scratch_col_[3 * i + 0] = ps.r[i];
-            scratch_col_[3 * i + 1] = ps.g[i];
-            scratch_col_[3 * i + 2] = ps.b[i];
-        }
-    } else {
-        for (std::size_t i = 0; i < n; ++i) {
-            scratch_col_[3 * i + 0] = 0.85f;
-            scratch_col_[3 * i + 1] = 0.90f;
-            scratch_col_[3 * i + 2] = 1.00f;
-        }
+    #pragma omp parallel for schedule(static)
+    for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(particle_count_); ++i) {
+        scratch_particles_[i] = {
+            static_cast<float>(ps.x[i]),
+            static_cast<float>(ps.y[i]),
+            static_cast<float>(ps.z[i]),
+            0.0f,
+            ps.r[i],
+            ps.g[i],
+            ps.b[i],
+            0.0f
+        };
     }
-    count_ = static_cast<GLsizei>(n);
 
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_pos_);
-    glBufferData(GL_ARRAY_BUFFER,
-                 static_cast<GLsizeiptr>(scratch_pos_.size() * sizeof(float)),
-                 scratch_pos_.data(),
-                 GL_DYNAMIC_DRAW);
-
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_col_);
-    glBufferData(GL_ARRAY_BUFFER,
-                 static_cast<GLsizeiptr>(scratch_col_.size() * sizeof(float)),
-                 scratch_col_.data(),
-                 GL_DYNAMIC_DRAW);
-
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    pipeline_->updateStorageBuffer(s_particles_, scratch_particles_.data(),
+                                   particle_count_ * sizeof(GpuParticle), 0);
+    pipeline_->instances = static_cast<int>(particle_count_);
 }
 
-void ParticleRenderer::draw(const glm::mat4& view_proj, float point_size)
+void ParticleRenderer::draw(wgfx::RenderPass* pass, const glm::mat4& view_proj,
+                            float point_size, float screen_width, float screen_height)
 {
-    glUseProgram(program_);
-    glUniformMatrix4fv(loc_mvp_, 1, GL_FALSE, glm::value_ptr(view_proj));
-    glUniform1f(loc_psize_, point_size);
+    if (particle_count_ == 0 || !pass) return;
 
-    glBindVertexArray(vao_);
-    glDrawArrays(GL_POINTS, 0, count_);
-    glBindVertexArray(0);
+    CameraUniforms cam_u{};
+    cam_u.view_proj     = view_proj;
+    cam_u.point_size    = point_size;
+    cam_u.screen_width  = screen_width;
+    cam_u.screen_height = screen_height;
 
-    glUseProgram(0);
+    pipeline_->updateUniform(u_camera_, reinterpret_cast<const float*>(&cam_u));
+    pass->draw(pipeline_);
 }
 
 } // namespace viz

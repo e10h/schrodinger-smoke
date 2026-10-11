@@ -100,7 +100,7 @@ TEST_CASE("apply_velocity_constraint sets the inside-region ψ to a plane wave",
     }
 
     // Region: a single vertex at the centre of the box.
-    const int ic = N / 2, jc = N / 2, kc = N / 2;
+    int ic = N / 2, jc = N / 2, kc = N / 2;
     auto region = [ic, jc, kc](int i, int j, int k) {
         return i == ic && j == jc && k == kc;
     };

@@ -1,0 +1,3 @@
+[submodule "third_party/wgfx"]
+	path = third_party/wgfx
+	url = https://github.com/Vyscosity/wgfx.git

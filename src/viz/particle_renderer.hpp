@@ -1,23 +1,15 @@
 /**
  * @file particle_renderer.hpp
- * @brief OpenGL renderer for the tracer-particle cloud.
+ * @brief WebGPU (wgfx) renderer for the tracer-particle cloud.
  *
- * Draws a ParticleSystem as additively-blended soft point sprites.
- * Ownership is RAII:
- *   - ctor: compiles the shader program, creates VAO and VBO,
- *   - dtor: deletes all GL objects.
- *
- * `upload()` copies the current particle positions into the VBO
- * (GL_DYNAMIC_DRAW). `draw()` binds the program, sets uniforms,
- * and issues one `glDrawArrays(GL_POINTS, …)`.
+ * Draws a ParticleSystem as soft additively-blended point billboard sprites
+ * via WebGPU WGSL compute/render pipelines.
  */
 
 #pragma once
 
-#include "viz/gl_includes.hpp"
-
+#include <wgfx.h>
 #include <glm/mat4x4.hpp>
-
 #include <vector>
 
 namespace viz {
@@ -25,51 +17,55 @@ namespace viz {
 struct ParticleSystem;
 
 /**
- * @brief Small RAII class that draws a ParticleSystem as point sprites.
+ * @brief WebGPU renderer for tracer particle cloud using billboard quads in WGSL.
  */
 class ParticleRenderer {
 public:
-    /**
-     * @brief Construct and initialise GL resources. A valid OpenGL
-     *        context must be current when this runs.
-     */
     ParticleRenderer();
-
-    /** @brief Release all owned GL resources. */
     ~ParticleRenderer();
 
     ParticleRenderer(const ParticleRenderer&)            = delete;
     ParticleRenderer& operator=(const ParticleRenderer&) = delete;
 
     /**
-     * @brief Upload the current particle positions to the VBO.
-     *
-     * Repacks the SoA position arrays into an interleaved float3 layout
-     * in a reusable host-side scratch buffer, then copies it to the
-     * GPU with glBufferData (orphan-and-replace for simplicity).
+     * @brief Upload particle positions and colors to WebGPU storage buffer.
      */
     void upload(const ParticleSystem& ps);
 
     /**
-     * @brief Draw the most recently uploaded particle cloud.
+     * @brief Draw the particle cloud into the active render pass.
      *
-     * @param view_proj  Combined view · projection matrix.
-     * @param point_size Base point-sprite size in screen pixels,
-     *                   attenuated by perspective depth in the shader.
+     * @param pass          Target wgfx render pass.
+     * @param view_proj     Camera view · projection matrix.
+     * @param point_size    Base point size in screen pixels.
+     * @param screen_width  Framebuffer pixel width.
+     * @param screen_height Framebuffer pixel height.
      */
-    void draw(const glm::mat4& view_proj, float point_size);
+    void draw(wgfx::RenderPass* pass, const glm::mat4& view_proj, float point_size,
+              float screen_width, float screen_height);
 
 private:
-    GLuint vao_         = 0;
-    GLuint vbo_pos_     = 0;
-    GLuint vbo_col_     = 0;
-    GLuint program_     = 0;
-    GLint  loc_mvp_     = -1;
-    GLint  loc_psize_   = -1;
-    GLsizei count_      = 0;
+    struct CameraUniforms {
+        glm::mat4 view_proj;
+        glm::vec4 cam_pos{0.0f};
+        float     point_size    = 4.0f;
+        float     screen_width  = 1280.0f;
+        float     screen_height = 720.0f;
+        float     pad0          = 0.0f;
+    };
 
-    std::vector<float> scratch_pos_;  ///< host-side interleave buffer (xyz)
-    std::vector<float> scratch_col_;  ///< host-side interleave buffer (rgb)
+    struct GpuParticle {
+        float x, y, z, pad0;
+        float r, g, b, pad1;
+    };
+
+    wgfx::Pipeline*       pipeline_      = nullptr;
+    wgfx::Uniform*        u_camera_      = nullptr;
+    wgfx::Uniform*        s_particles_   = nullptr;
+    std::size_t           particle_count_ = 0;
+    std::size_t           buffer_capacity_ = 0;
+
+    std::vector<GpuParticle> scratch_particles_;
 };
 
 } // namespace viz

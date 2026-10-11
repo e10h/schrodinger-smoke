@@ -2,15 +2,12 @@ cmake_minimum_required(VERSION 3.20)
 project(schroedinger
     VERSION 0.1.0
     DESCRIPTION "Schroedinger's Smoke — incompressible fluid simulation via the Schrödinger equation"
-    LANGUAGES CXX)
+    LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Default to Release if the user didn't pick a build type. Without this
-# CMake's "no build type" mode compiles everything with -O0, which makes
-# the solver ~10x slower than necessary.
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING
         "Choose the build type." FORCE)
@@ -18,18 +15,11 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
         Debug Release RelWithDebInfo MinSizeRel)
 endif()
 
-# Generate compile_commands.json for clangd / IDEs.
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Warnings.
+# Warnings
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     add_compile_options(-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wno-sign-conversion)
-
-    # Aggressive native-arch tuning for the solver hot path. -ffast-math
-    # is intentionally NOT enabled here: pocketfft and the pressure
-    # projection rely on IEEE-754 semantics (NaN handling, signed zero,
-    # subnormals at the FFT boundaries), and the speed-up vs. plain -O3
-    # on this workload is small.
     add_compile_options($<$<CONFIG:Release>:-O3>
                         $<$<CONFIG:Release>:-march=native>
                         $<$<CONFIG:Release>:-DNDEBUG>)
@@ -44,7 +34,7 @@ add_library(pocketfft INTERFACE)
 target_include_directories(pocketfft INTERFACE
     ${CMAKE_SOURCE_DIR}/third_party)
 
-# Catch2 — test framework, fetched on first configure.
+# Catch2 — test framework
 include(FetchContent)
 FetchContent_Declare(
     Catch2
@@ -52,10 +42,7 @@ FetchContent_Declare(
     GIT_TAG v3.5.4)
 FetchContent_MakeAvailable(Catch2)
 
-# OpenMP — used to parallelise the per-vertex inner loops in the
-# solver. CMake's first-class FindOpenMP works with the modern
-# Homebrew libomp + Apple Clang combination once the right hint
-# variables are set.
+# OpenMP
 if(APPLE)
     if(EXISTS "/opt/homebrew/opt/libomp")
         set(OpenMP_ROOT          /opt/homebrew/opt/libomp)
@@ -69,42 +56,65 @@ if(NOT OpenMP_CXX_FOUND)
     message(STATUS "OpenMP not found — solver will run single-threaded")
 endif()
 
-# GLFW — windowing and input. Expected to be installed system-wide
-# (e.g. via Homebrew). We use find_package rather than FetchContent
-# to keep build times reasonable.
-find_package(glfw3 QUIET)
-
-# GLM — header-only math library. Prefer the system package, fall
-# back to FetchContent only if the user has no system install.
+# GLM — header-only math library
 find_package(glm QUIET)
+if(NOT glm_FOUND AND NOT TARGET glm::glm)
+    FetchContent_Declare(
+        glm
+        GIT_REPOSITORY https://github.com/g-truc/glm.git
+        GIT_TAG 1.0.1)
+    FetchContent_MakeAvailable(glm)
+    set(glm_FOUND TRUE)
+endif()
 
-# Dear ImGui — no upstream CMake, so we fetch the sources and build
-# a small static library from the subset of files we need.
+# SDL3 (system or Homebrew)
+find_package(SDL3 QUIET)
+if(NOT SDL3_FOUND)
+    if(APPLE AND EXISTS "/opt/homebrew/opt/sdl3")
+        set(SDL3_ROOT /opt/homebrew/opt/sdl3)
+        find_package(SDL3 REQUIRED)
+    else()
+        message(FATAL_ERROR "SDL3 not found. Please install SDL3 via Homebrew ('brew install sdl3').")
+    endif()
+endif()
+
+# WebGPU graphics library (wgfx)
+add_subdirectory(third_party/wgfx)
+
+# Dear ImGui
 FetchContent_Declare(
     imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG v1.90.8)
+    GIT_TAG v1.92.9)
 FetchContent_MakeAvailable(imgui)
 
-if(glfw3_FOUND AND glm_FOUND)
-    add_library(imgui STATIC
-        ${imgui_SOURCE_DIR}/imgui.cpp
-        ${imgui_SOURCE_DIR}/imgui_draw.cpp
-        ${imgui_SOURCE_DIR}/imgui_tables.cpp
-        ${imgui_SOURCE_DIR}/imgui_widgets.cpp
-        ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
-        ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp)
-    target_include_directories(imgui PUBLIC
-        ${imgui_SOURCE_DIR}
-        ${imgui_SOURCE_DIR}/backends)
-    target_link_libraries(imgui PUBLIC glfw)
+set(IMGUI_SRC
+    ${imgui_SOURCE_DIR}/imgui.cpp
+    ${imgui_SOURCE_DIR}/imgui_draw.cpp
+    ${imgui_SOURCE_DIR}/imgui_tables.cpp
+    ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
+    src/viz/imgui_impl_wgpu.cpp
+)
+
+add_library(imgui STATIC ${IMGUI_SRC})
+target_include_directories(imgui PUBLIC
+    ${imgui_SOURCE_DIR}
+    ${imgui_SOURCE_DIR}/backends
+    ${CMAKE_SOURCE_DIR}/third_party/wgfx/src
+)
+target_link_libraries(imgui PUBLIC SDL3::SDL3 webgpu)
+target_compile_definitions(imgui PUBLIC IMGUI_IMPL_WEBGPU_BACKEND_WGPU)
+
+if(APPLE)
+    set_source_files_properties(
+        src/viz/imgui_impl_wgpu.cpp
+        PROPERTIES COMPILE_FLAGS "-x objective-c++"
+    )
 endif()
 
 # ------------------------------------------------------------------
 # ISF core library
-#
-# Sources are added incrementally via target_sources() as each TDD
-# cycle introduces a new component.
 # ------------------------------------------------------------------
 
 add_library(isf STATIC
@@ -127,9 +137,6 @@ endif()
 
 # ------------------------------------------------------------------
 # Visualization / output library
-#
-# Pure CPU for now: tracer particles and advection. The OpenGL viewer
-# in Phase 2 will add its own window/renderer sources alongside these.
 # ------------------------------------------------------------------
 
 add_library(viz STATIC
@@ -146,29 +153,34 @@ if(OpenMP_CXX_FOUND)
 endif()
 
 # ------------------------------------------------------------------
-# Interactive viewer application
-#
-# Only built if the system provides GLFW + GLM. Otherwise the core
-# library and tests still build cleanly.
+# Interactive viewer application (WebGPU + SDL3)
 # ------------------------------------------------------------------
 
-if(glfw3_FOUND AND glm_FOUND)
-    add_executable(schroedinger_viewer
-        src/main.cpp
-        src/viz/window.cpp
-        src/viz/shader.cpp
-        src/viz/particle_renderer.cpp
-        src/viz/gif_recorder.cpp
-    )
-    target_link_libraries(schroedinger_viewer PRIVATE
-        viz isf glfw glm::glm imgui "-framework OpenGL")
-    set_target_properties(schroedinger_viewer PROPERTIES
-        CXX_STANDARD 20)
-endif()
+add_executable(schroedinger_viewer
+    src/main.cpp
+    src/viz/window.cpp
+    src/viz/particle_renderer.cpp
+    src/viz/gif_recorder.cpp
+)
+target_include_directories(schroedinger_viewer PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party
+    ${CMAKE_SOURCE_DIR}/third_party/wgfx/src
+    ${CMAKE_SOURCE_DIR}/third_party/wgfx/deps/sdl2webgpu
+    ${imgui_SOURCE_DIR}
+    ${imgui_SOURCE_DIR}/backends
+)
+target_link_libraries(schroedinger_viewer PRIVATE
+    viz isf wgfx sdl2webgpu SDL3::SDL3 glm::glm imgui webgpu
+)
+set_target_properties(schroedinger_viewer PROPERTIES
+    CXX_STANDARD 20
+)
+
+target_copy_webgpu_binaries(schroedinger_viewer)
 
 # ------------------------------------------------------------------
-# CPU benchmark — headless, no GL, no ImGui. Used to track
-# performance regressions and improvements as we optimize.
+# CPU benchmark
 # ------------------------------------------------------------------
 
 add_executable(bench_solver src/bench_solver.cpp)
