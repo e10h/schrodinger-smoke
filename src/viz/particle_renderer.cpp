@@ -154,6 +154,14 @@ void ParticleRenderer::upload(const ParticleSystem& ps)
     pipeline_->instances = static_cast<int>(particle_count_);
 }
 
+void ParticleRenderer::set_particle_count(std::size_t count) noexcept
+{
+    particle_count_ = count;
+    if (pipeline_) {
+        pipeline_->instances = static_cast<int>(count);
+    }
+}
+
 void ParticleRenderer::draw(wgfx::RenderPass* pass, const glm::mat4& view_proj,
                             float point_size, float screen_width, float screen_height)
 {

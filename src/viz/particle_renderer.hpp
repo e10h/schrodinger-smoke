@@ -33,6 +33,19 @@ public:
     void upload(const ParticleSystem& ps);
 
     /**
+     * @brief WebGPU storage buffer handle for GPU compute advection.
+     */
+    [[nodiscard]] wgpu::Buffer particle_buffer() const noexcept {
+        return s_particles_ ? s_particles_->buffer : nullptr;
+    }
+
+    [[nodiscard]] std::size_t particle_count() const noexcept {
+        return particle_count_;
+    }
+
+    void set_particle_count(std::size_t count) noexcept;
+
+    /**
      * @brief Draw the particle cloud into the active render pass.
      *
      * @param pass          Target wgfx render pass.

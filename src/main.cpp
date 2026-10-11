@@ -16,6 +16,7 @@
 
 #include "viz/camera.hpp"
 #include "viz/gif_recorder.hpp"
+#include "viz/gpu_solver.hpp"
 #include "viz/particle_renderer.hpp"
 #include "viz/particles.hpp"
 #include "viz/window.hpp"
@@ -45,7 +46,7 @@ inline void resize_particles(viz::ParticleSystem& ps, std::size_t n)
     ps.b.resize(n);
 }
 
-constexpr int    kInitialGridN     = 96;     ///< startup lattice size
+constexpr int    kInitialGridN     = 64;     ///< startup lattice size (power of 2)
 constexpr int    kInitialParticles = 150000; ///< startup tracer count
 constexpr double kDomainSize       = 1.0;    ///< physical domain (m)
 constexpr double kRingRadius       = 0.20;   ///< vortex ring radius (m)
@@ -172,10 +173,20 @@ void seed_particles_two_balls(viz::ParticleSystem& ps,
 
 int main(int /*argc*/, char** /*argv*/)
 try {
+    viz::Window  win(1280, 720, "Schroedinger's Smoke (WebGPU)");
+    viz::ParticleRenderer renderer;
+    viz::GifRecorder      recorder;
+    viz::OrbitCamera      cam(
+        glm::vec3{ 0.5f * float(kDomainSize) },
+        1.6f * float(kDomainSize));
+
     int    grid_n      = kInitialGridN;
     int    n_particles = kInitialParticles;
     isf::Grid3D g(grid_n, grid_n, grid_n,
                   kDomainSize, kDomainSize, kDomainSize);
+
+    viz::GpuFluidSolver gpu_solver(grid_n, kDomainSize);
+    bool use_gpu = true;
 
     viz::ParticleSystem ps;
     std::mt19937 rng(0xC0FFEEu);
@@ -197,6 +208,8 @@ try {
             seed_particles_two_balls(ps, rng, n_particles);
             break;
         }
+        renderer.upload(ps);
+        gpu_solver.upload_grid(g);
     };
     reset_scene();
 
@@ -204,18 +217,12 @@ try {
         grid_n = new_n;
         g = isf::Grid3D(grid_n, grid_n, grid_n,
                         kDomainSize, kDomainSize, kDomainSize);
+        gpu_solver.resize(grid_n);
         reset_scene();
     };
 
     isf::PressureWorkspace press_ws;
     isf::VelocityField     vf;
-
-    viz::Window  win(1280, 720, "Schroedinger's Smoke (WebGPU)");
-    viz::ParticleRenderer renderer;
-    viz::GifRecorder      recorder;
-    viz::OrbitCamera      cam(
-        glm::vec3{ 0.5f * float(kDomainSize) },
-        1.6f * float(kDomainSize));
 
     uint64_t perf_freq  = SDL_GetPerformanceFrequency();
     uint64_t perf_prev  = SDL_GetPerformanceCounter();
@@ -237,11 +244,18 @@ try {
 
         // --- physics ---
         if (!pause_sim) {
-            isf::schrodinger_step(g, dt, hbar);
-            isf::normalize(g);
-            isf::pressure_project(g, press_ws);
-            isf::recover_velocity_from_workspace(g, hbar, press_ws, vf);
-            viz::advect_particles_rk2(ps, g, vf, dt);
+            if (use_gpu) {
+                gpu_solver.step(dt, hbar);
+                gpu_solver.advect_particles(renderer.particle_buffer(),
+                                            renderer.particle_count(), dt);
+            } else {
+                isf::schrodinger_step(g, dt, hbar);
+                isf::normalize(g);
+                isf::pressure_project(g, press_ws);
+                isf::recover_velocity_from_workspace(g, hbar, press_ws, vf);
+                viz::advect_particles_rk2(ps, g, vf, dt);
+                renderer.upload(ps);
+            }
         }
 
         // --- render ---
@@ -263,11 +277,13 @@ try {
         // ImGui control panel
         ImGui::Begin("Schroedinger's Smoke");
         ImGui::Text("FPS: %.1f (WebGPU / SDL3)", fps_display);
-        ImGui::Text("Grid: %d^3  particles: %zu", grid_n, ps.size());
+        ImGui::Text("Grid: %d^3  particles: %zu", grid_n, static_cast<size_t>(n_particles));
 
-        static const int  res_options[] = { 48, 64, 80, 96, 128, 160 };
-        static const char* res_labels[]  = { "48^3", "64^3", "80^3", "96^3", "128^3", "160^3" };
-        int res_idx = 0;
+        ImGui::Checkbox("GPU Compute Solver (WGSL)", &use_gpu);
+
+        static const int  res_options[] = { 32, 64, 128, 256 };
+        static const char* res_labels[]  = { "32^3", "64^3", "128^3", "256^3" };
+        int res_idx = 1; // default to 64
         for (int i = 0; i < IM_ARRAYSIZE(res_options); ++i) {
             if (res_options[i] == grid_n) { res_idx = i; break; }
         }
@@ -292,13 +308,16 @@ try {
             dt = dt_f;
         }
         ImGui::SliderFloat("point size", &point_size, 1.0f, 12.0f, "%.1f");
-        ImGui::SliderInt("particles", &n_particles, 10000, 600000);
+        if (ImGui::SliderInt("particles", &n_particles, 10000, 600000)) {
+            // will take effect on next reset particles
+        }
         ImGui::Checkbox("pause", &pause_sim);
         if (ImGui::Button("reset ψ")) {
             switch (scene) {
             case Scene::VortexRing:    reset_vortex_ring(g);     break;
             case Scene::CollidingBalls:reset_two_balls(g, hbar); break;
             }
+            gpu_solver.upload_grid(g);
         }
         ImGui::SameLine();
         if (ImGui::Button("reset particles")) {
@@ -306,6 +325,7 @@ try {
             case Scene::VortexRing:    seed_particles_ring(ps, rng, n_particles);      break;
             case Scene::CollidingBalls:seed_particles_two_balls(ps, rng, n_particles); break;
             }
+            renderer.upload(ps);
         }
         ImGui::SameLine();
         if (ImGui::Button("reset all")) {
@@ -320,8 +340,6 @@ try {
         win.framebuffer_size(fbw, fbh);
         const float aspect = fbh > 0 ? float(fbw) / float(fbh) : 1.0f;
         const glm::mat4 view_proj = cam.projection_matrix(aspect) * cam.view_matrix();
-
-        renderer.upload(ps);
 
         wgfx::RenderPass* scene_pass = win.render_pass();
         scene_pass->prepare();
