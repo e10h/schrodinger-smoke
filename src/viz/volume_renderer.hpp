@@ -45,6 +45,7 @@ struct VolumeRenderParams {
     float           light_x         = 0.40f; ///< Key light direction X
     float           light_y         = 0.85f; ///< Key light direction Y
     float           light_z         = 0.45f; ///< Key light direction Z
+    bool            preview_lighting = false; ///< Viewport preview: false = unlit (fast), true = lit (studio)
 };
 
 class VolumeRenderer {
@@ -77,6 +78,37 @@ public:
                 const glm::mat4& inv_view_proj,
                 const glm::vec3& cam_pos,
                 const VolumeRenderParams& params);
+
+    /**
+     * @brief Render the volume directly using an active WebGPU RenderPassEncoder.
+     */
+    void draw_to_encoder(wgpu::RenderPassEncoder rpe,
+                         wgpu::Buffer vel_buffer,
+                         wgpu::Buffer psi1_buffer,
+                         wgpu::Buffer psi2_buffer,
+                         int grid_n,
+                         float domain_size,
+                         const glm::mat4& inv_view_proj,
+                         const glm::vec3& cam_pos,
+                         const VolumeRenderParams& params,
+                         bool force_lighting = false);
+
+    /**
+     * @brief Render the volume with full lighting offscreen and save to ./renders/.
+     *
+     * @return Path to the saved image file (e.g. "renders/render_0001.bmp").
+     */
+    std::string render_to_file(wgpu::Buffer vel_buffer,
+                               wgpu::Buffer psi1_buffer,
+                               wgpu::Buffer psi2_buffer,
+                               int grid_n,
+                               float domain_size,
+                               const glm::mat4& inv_view_proj,
+                               const glm::vec3& cam_pos,
+                               const VolumeRenderParams& params,
+                               int width,
+                               int height,
+                               const std::string& output_dir = "renders");
 
 private:
     struct UniformData {

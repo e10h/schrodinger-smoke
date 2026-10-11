@@ -15,5 +15,7 @@ imgui.ini
 # Generated docs (run `doxygen Doxyfile` to rebuild).
 docs/
 
-# GIF recordings from the viewer.
+# GIF recordings and renders from the viewer.
 recording_*.gif
+renders/*
+!renders/.gitkeep

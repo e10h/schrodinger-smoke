@@ -6,6 +6,12 @@
 #include "viz/volume_renderer.hpp"
 
 #include <iostream>
+#include <filesystem>
+#include <fstream>
+#include <vector>
+#include <cstring>
+#include <cstdio>
+#include <algorithm>
 
 namespace viz {
 
@@ -410,15 +416,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let sample_alpha = 1.0 - exp(-density * dt);
             let norm_val = clamp((f.density_val - threshold) / max(threshold * 8.0, 0.02), 0.0, 1.0);
 
-            // Shading & illumination
-            let shadow = compute_volumetric_shadow(p, field_mode, grid_n, box_max, light_dir, threshold, density_s, shadow_strength);
-            let normal = compute_gradient_normal(p, field_mode, grid_n, box_max);
-            let ndotl  = clamp(dot(normal, light_dir), 0.0, 1.0);
+            // Shading & illumination (fast unlit preview if shadow_strength <= 0.01)
+            var illum = 1.0;
+            if (shadow_strength > 0.01) {
+                let shadow = compute_volumetric_shadow(p, field_mode, grid_n, box_max, light_dir, threshold, density_s, shadow_strength);
+                let normal = compute_gradient_normal(p, field_mode, grid_n, box_max);
+                let ndotl  = clamp(dot(normal, light_dir), 0.0, 1.0);
 
-            let direct = (0.22 + 0.78 * ndotl) * shadow;
-            let fill   = 0.20 * clamp(dot(normal, vec3<f32>(-light_dir.x, -0.35, -light_dir.z)), 0.0, 1.0);
-            let rim    = pow(clamp(dot(rd, light_dir) * 0.5 + 0.5, 0.0, 1.0), 3.0) * 0.30 * shadow;
-            let illum  = direct + fill + rim;
+                let direct = (0.22 + 0.78 * ndotl) * shadow;
+                let fill   = 0.20 * clamp(dot(normal, vec3<f32>(-light_dir.x, -0.35, -light_dir.z)), 0.0, 1.0);
+                let rim    = pow(clamp(dot(rd, light_dir) * 0.5 + 0.5, 0.0, 1.0), 3.0) * 0.30 * shadow;
+                illum  = direct + fill + rim;
+            }
 
             let v_sample = sample_vel(p, grid_n, box_max);
             let raw_col  = get_color(norm_val, palette_idx, f.color_val, f.is_cyclic, p, v_sample, box_max);
@@ -488,17 +497,18 @@ VolumeRenderer::~VolumeRenderer()
 {
 }
 
-void VolumeRenderer::render(wgfx::RenderPass* pass,
-                            wgpu::Buffer vel_buffer,
-                            wgpu::Buffer psi1_buffer,
-                            wgpu::Buffer psi2_buffer,
-                            int grid_n,
-                            float domain_size,
-                            const glm::mat4& inv_view_proj,
-                            const glm::vec3& cam_pos,
-                            const VolumeRenderParams& params)
+void VolumeRenderer::draw_to_encoder(wgpu::RenderPassEncoder rpe,
+                                     wgpu::Buffer vel_buffer,
+                                     wgpu::Buffer psi1_buffer,
+                                     wgpu::Buffer psi2_buffer,
+                                     int grid_n,
+                                     float domain_size,
+                                     const glm::mat4& inv_view_proj,
+                                     const glm::vec3& cam_pos,
+                                     const VolumeRenderParams& params,
+                                     bool force_lighting)
 {
-    if (!pass || !vel_buffer || !psi1_buffer || !psi2_buffer || grid_n <= 0) return;
+    if (!rpe || !vel_buffer || !psi1_buffer || !psi2_buffer || grid_n <= 0) return;
 
     // Recreate bind group whenever buffers or resolution change
     if (bound_buffer_ != vel_buffer || bound_psi1_ != psi1_buffer || bound_psi2_ != psi2_buffer || bound_grid_n_ != grid_n) {
@@ -551,10 +561,231 @@ void VolumeRenderer::render(wgfx::RenderPass* pass,
                                  static_cast<float>(params.palette));
 
     glm::vec3 l_dir = glm::normalize(glm::vec3(params.light_x, params.light_y, params.light_z));
-    u.light_params   = glm::vec4(l_dir, params.shadow_strength);
+    const float eff_shadow = (params.preview_lighting || force_lighting) ? params.shadow_strength : 0.0f;
+    u.light_params   = glm::vec4(l_dir, eff_shadow);
 
     pipeline_->updateUniform(u_params_, reinterpret_cast<const float*>(&u));
-    pass->draw(pipeline_);
+
+    pipeline_->uniforms.clearForNewFrame();
+    rpe.setBindGroup(0, pipeline_->uniforms.bindGroup, pipeline_->uniforms.dynamicUniformCount, pipeline_->uniforms.dynamicOffsets.data());
+    rpe.setPipeline(pipeline_->pipeline);
+    rpe.draw(pipeline_->vertices, pipeline_->instances, 0, 0);
+}
+
+void VolumeRenderer::render(wgfx::RenderPass* pass,
+                            wgpu::Buffer vel_buffer,
+                            wgpu::Buffer psi1_buffer,
+                            wgpu::Buffer psi2_buffer,
+                            int grid_n,
+                            float domain_size,
+                            const glm::mat4& inv_view_proj,
+                            const glm::vec3& cam_pos,
+                            const VolumeRenderParams& params)
+{
+    if (!pass) return;
+    draw_to_encoder(pass->renderPass, vel_buffer, psi1_buffer, psi2_buffer,
+                    grid_n, domain_size, inv_view_proj, cam_pos, params, false);
+}
+
+std::string VolumeRenderer::render_to_file(wgpu::Buffer vel_buffer,
+                                           wgpu::Buffer psi1_buffer,
+                                           wgpu::Buffer psi2_buffer,
+                                           int grid_n,
+                                           float domain_size,
+                                           const glm::mat4& inv_view_proj,
+                                           const glm::vec3& cam_pos,
+                                           const VolumeRenderParams& params,
+                                           int width,
+                                           int height,
+                                           const std::string& output_dir)
+{
+    if (width <= 0 || height <= 0 || !vel_buffer || !psi1_buffer || !psi2_buffer || grid_n <= 0) {
+        return {};
+    }
+
+    std::error_code ec;
+    std::filesystem::create_directories(output_dir, ec);
+
+    // Find next available sequential filename
+    int index = 1;
+    std::string out_path;
+    while (true) {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "render_%04d.bmp", index);
+        auto p = std::filesystem::path(output_dir) / buf;
+        if (!std::filesystem::exists(p, ec)) {
+            out_path = p.string();
+            break;
+        }
+        index++;
+    }
+
+    // 1. Create offscreen render target texture
+    wgpu::TextureDescriptor tex_desc{};
+    tex_desc.dimension       = wgpu::TextureDimension::_2D;
+    tex_desc.format          = wgfx::surfaceFormat;
+    tex_desc.size            = { static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1 };
+    tex_desc.sampleCount     = 1;
+    tex_desc.mipLevelCount   = 1;
+    tex_desc.usage           = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc;
+
+    wgpu::Texture offscreen_tex = wgfx::device.createTexture(tex_desc);
+    if (!offscreen_tex) return {};
+    wgpu::TextureView offscreen_view = offscreen_tex.createView();
+
+    // 2. Offscreen render pass with full lighting
+    wgpu::CommandEncoder encoder = wgfx::device.createCommandEncoder();
+
+    wgpu::RenderPassColorAttachment color_att{};
+    color_att.view          = offscreen_view;
+    color_att.resolveTarget = nullptr;
+    color_att.loadOp        = wgpu::LoadOp::Clear;
+    color_att.storeOp       = wgpu::StoreOp::Store;
+    color_att.clearValue    = { 0.02, 0.03, 0.06, 1.0 };
+#ifdef __EMSCRIPTEN__
+    color_att.depthSlice    = WGPU_DEPTH_SLICE_UNDEFINED;
+#endif
+
+    wgpu::RenderPassDescriptor rp_desc{};
+    rp_desc.colorAttachmentCount   = 1;
+    rp_desc.colorAttachments       = &color_att;
+    rp_desc.depthStencilAttachment = nullptr;
+
+    wgpu::RenderPassEncoder rpe = encoder.beginRenderPass(rp_desc);
+
+    VolumeRenderParams lit_params = params;
+    lit_params.shadow_strength = std::max(0.80f, params.shadow_strength);
+    lit_params.step_count      = std::max(200.0f, params.step_count);
+
+    draw_to_encoder(rpe, vel_buffer, psi1_buffer, psi2_buffer,
+                    grid_n, domain_size, inv_view_proj, cam_pos,
+                    lit_params, /*force_lighting=*/true);
+
+    rpe.end();
+    rpe.release();
+
+    // 3. Staging buffer (aligned to 256 bytes per row)
+    const uint32_t bytes_per_pixel = 4;
+    const uint32_t pitch           = (static_cast<uint32_t>(width) * bytes_per_pixel + 255) & ~255;
+    const uint32_t total_bytes     = pitch * static_cast<uint32_t>(height);
+
+    wgpu::BufferDescriptor buf_desc{};
+    buf_desc.label            = "Offline Render Readback Staging Buffer";
+    buf_desc.usage            = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst;
+    buf_desc.size             = total_bytes;
+    buf_desc.mappedAtCreation = false;
+    wgpu::Buffer staging_buf   = wgfx::device.createBuffer(buf_desc);
+
+    wgpu::ImageCopyTexture src_copy{};
+    src_copy.texture  = offscreen_tex;
+    src_copy.mipLevel = 0;
+    src_copy.origin   = { 0, 0, 0 };
+    src_copy.aspect   = wgpu::TextureAspect::All;
+
+    wgpu::ImageCopyBuffer dst_copy{};
+    dst_copy.buffer              = staging_buf;
+    dst_copy.layout.offset       = 0;
+    dst_copy.layout.bytesPerRow  = pitch;
+    dst_copy.layout.rowsPerImage = static_cast<uint32_t>(height);
+
+    wgpu::Extent3D copy_size = { static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1 };
+    encoder.copyTextureToBuffer(src_copy, dst_copy, copy_size);
+
+    wgpu::CommandBuffer cb = encoder.finish();
+    encoder.release();
+
+    wgfx::queue.submit(1, &cb);
+    cb.release();
+
+    // 4. Map buffer and wait synchronously via device.poll
+    struct MapCtx {
+        bool done = false;
+        wgpu::BufferMapAsyncStatus status = wgpu::BufferMapAsyncStatus::Unknown;
+    };
+    MapCtx map_ctx;
+    auto map_handle = staging_buf.mapAsync(wgpu::MapMode::Read, 0, total_bytes,
+        [&map_ctx](wgpu::BufferMapAsyncStatus status) {
+            map_ctx.status = status;
+            map_ctx.done   = true;
+        });
+
+    while (!map_ctx.done) {
+        wgfx::device.poll(true);
+    }
+
+    if (map_ctx.status != wgpu::BufferMapAsyncStatus::Success) {
+        staging_buf.release();
+        offscreen_view.release();
+        offscreen_tex.release();
+        return {};
+    }
+
+    const uint8_t* raw = static_cast<const uint8_t*>(staging_buf.getConstMappedRange(0, total_bytes));
+
+    // 5. Write 32-bit BMP (BGRA)
+#pragma pack(push, 1)
+    struct BmpHeader {
+        uint16_t file_type{0x4D42}; // 'BM'
+        uint32_t file_size{0};
+        uint16_t reserved1{0};
+        uint16_t reserved2{0};
+        uint32_t offset_data{54};
+        uint32_t header_size{40};
+        int32_t  width{0};
+        int32_t  height{0};
+        uint16_t planes{1};
+        uint16_t bit_count{32};
+        uint32_t compression{0};
+        uint32_t size_image{0};
+        int32_t  x_pels_per_meter{2835};
+        int32_t  y_pels_per_meter{2835};
+        uint32_t clr_used{0};
+        uint32_t clr_important{0};
+    };
+#pragma pack(pop)
+
+    BmpHeader hdr;
+    hdr.width      = width;
+    hdr.height     = height;
+    hdr.size_image = static_cast<uint32_t>(width * height * 4);
+    hdr.file_size  = 54 + hdr.size_image;
+
+    std::ofstream out(out_path, std::ios::binary);
+    if (!out) {
+        staging_buf.unmap();
+        staging_buf.release();
+        offscreen_view.release();
+        offscreen_tex.release();
+        return {};
+    }
+    out.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
+
+    const bool is_bgra = (wgfx::surfaceFormat == wgpu::TextureFormat::BGRA8Unorm ||
+                          wgfx::surfaceFormat == wgpu::TextureFormat::BGRA8UnormSrgb);
+
+    std::vector<uint8_t> row_buf(width * 4);
+    for (int y = height - 1; y >= 0; --y) {
+        const uint8_t* src_row = raw + y * pitch;
+        if (is_bgra) {
+            std::memcpy(row_buf.data(), src_row, width * 4);
+        } else {
+            for (int x = 0; x < width; ++x) {
+                row_buf[x * 4 + 0] = src_row[x * 4 + 2]; // B
+                row_buf[x * 4 + 1] = src_row[x * 4 + 1]; // G
+                row_buf[x * 4 + 2] = src_row[x * 4 + 0]; // R
+                row_buf[x * 4 + 3] = src_row[x * 4 + 3]; // A
+            }
+        }
+        out.write(reinterpret_cast<const char*>(row_buf.data()), width * 4);
+    }
+    out.close();
+
+    staging_buf.unmap();
+    staging_buf.release();
+    offscreen_view.release();
+    offscreen_tex.release();
+
+    return out_path;
 }
 
 } // namespace viz

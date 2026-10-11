@@ -260,8 +260,15 @@ enum class SeedPattern : int {
     BornPsiDensity = 2
 };
 
-int main(int /*argc*/, char** /*argv*/)
+int main(int argc, char** argv)
 try {
+    bool test_render_mode = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--render-test") {
+            test_render_mode = true;
+        }
+    }
+
     viz::Window           win(1280, 720, "Schroedinger's Smoke (WebGPU)");
     viz::VolumeRenderer   vol_renderer;
     viz::ParticleRenderer renderer;
@@ -283,6 +290,8 @@ try {
     // Raytraced voxels (volumetric) is the default rendering mode
     RenderMode render_mode = RenderMode::VolumeRaymarch;
     viz::VolumeRenderParams vol_params;
+    bool render_requested = false;
+    std::string last_render_path;
 
     viz::ParticleAdvectParams part_params;
     SeedPattern seed_pattern = SeedPattern::SceneGeometry;
@@ -340,6 +349,32 @@ try {
     double   t_accum    = 0.0;
     int      frames_accum = 0;
     float    fps_display  = 0.0f;
+    if (test_render_mode) {
+        for (int i = 0; i < 5; ++i) {
+            gpu_solver.step(dt, hbar);
+        }
+        int fbw = 0, fbh = 0;
+        win.framebuffer_size(fbw, fbh);
+        const float aspect = fbh > 0 ? float(fbw) / float(fbh) : 1.0f;
+        const glm::mat4 view_proj = cam.projection_matrix(aspect) * cam.view_matrix();
+        const glm::mat4 inv_view_proj = glm::inverse(view_proj);
+
+        std::string saved = vol_renderer.render_to_file(
+            gpu_solver.velocity_buffer(),
+            gpu_solver.psi1_buffer(),
+            gpu_solver.psi2_buffer(),
+            grid_n,
+            static_cast<float>(kDomainSize),
+            inv_view_proj,
+            cam.position(),
+            vol_params,
+            fbw,
+            fbh,
+            "renders"
+        );
+        std::printf("Render test produced: %s\n", saved.c_str());
+        return saved.empty() ? EXIT_FAILURE : EXIT_SUCCESS;
+    }
 
     while (!win.should_close()) {
         win.poll_events();
@@ -443,13 +478,30 @@ try {
 
             ImGui::SliderFloat("density", &vol_params.density_scale, 1.0f, 60.0f, "%.1f");
             ImGui::SliderFloat("threshold", &vol_params.threshold, 0.001f, 0.5f, "%.3f");
-            ImGui::SliderFloat("ray steps", &vol_params.step_count, 32.0f, 320.0f, "%.0f");
-            ImGui::SliderFloat("self-shadow", &vol_params.shadow_strength, 0.0f, 1.5f, "%.2f");
-            if (ImGui::TreeNode("Key Light Direction")) {
+            ImGui::Checkbox("preview lighting", &vol_params.preview_lighting);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Unchecked: Fast unlit preview for smooth interaction.\n"
+                                  "Checked: Real-time volumetric shadows in viewport.");
+            }
+            if (vol_params.preview_lighting) {
+                ImGui::SliderFloat("preview shadow", &vol_params.shadow_strength, 0.0f, 1.5f, "%.2f");
+            } else {
+                ImGui::TextDisabled("Preview mode: Unlit (Click Render for full lighting)");
+            }
+
+            if (ImGui::TreeNode("Key Light & Shadow Config")) {
                 ImGui::SliderFloat("light X", &vol_params.light_x, -1.0f, 1.0f, "%.2f");
                 ImGui::SliderFloat("light Y", &vol_params.light_y, 0.1f, 1.0f, "%.2f");
                 ImGui::SliderFloat("light Z", &vol_params.light_z, -1.0f, 1.0f, "%.2f");
+                ImGui::SliderFloat("shadow strength", &vol_params.shadow_strength, 0.0f, 1.5f, "%.2f");
                 ImGui::TreePop();
+            }
+
+            if (ImGui::Button("Render Frame (With Lighting) -> ./renders", ImVec2(-1, 28))) {
+                render_requested = true;
+            }
+            if (!last_render_path.empty()) {
+                ImGui::TextColored(ImVec4(0.35f, 0.95f, 0.45f, 1.0f), "Rendered: %s", last_render_path.c_str());
             }
         }
 
@@ -573,6 +625,18 @@ try {
             reset_scene();
         }
         ImGui::Separator();
+        ImGui::SeparatorText("Rendering & Export");
+        if (ImGui::Button("Render Frame to ./renders (Lit)", ImVec2(-1, 30))) {
+            render_requested = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Renders the 3D quantum smoke field with volumetric self-shadowing\n"
+                              "and gradient normal illumination, saving to ./renders/render_XXXX.bmp.");
+        }
+        if (!last_render_path.empty()) {
+            ImGui::TextColored(ImVec4(0.35f, 0.95f, 0.45f, 1.0f), "Saved: %s", last_render_path.c_str());
+        }
+
         recorder.imgui_panel();
         ImGui::End();
 
@@ -582,6 +646,24 @@ try {
         const float aspect = fbh > 0 ? float(fbw) / float(fbh) : 1.0f;
         const glm::mat4 view_proj = cam.projection_matrix(aspect) * cam.view_matrix();
         const glm::mat4 inv_view_proj = glm::inverse(view_proj);
+
+        // Offline high-quality render with lighting to disk
+        if (render_requested) {
+            render_requested = false;
+            last_render_path = vol_renderer.render_to_file(
+                gpu_solver.velocity_buffer(),
+                gpu_solver.psi1_buffer(),
+                gpu_solver.psi2_buffer(),
+                grid_n,
+                static_cast<float>(kDomainSize),
+                inv_view_proj,
+                cam.position(),
+                vol_params,
+                fbw,
+                fbh,
+                "renders"
+            );
+        }
 
         wgfx::RenderPass* scene_pass = win.render_pass();
         scene_pass->prepare();
